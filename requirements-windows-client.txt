@@ -1,0 +1,4 @@
+# Optional dependencies for report_app.py on Windows only.
+requests
+psutil
+pywin32

@@ -1,0 +1,32 @@
+# Private runtime configuration and state
+data.json
+local.env.bat
+.env
+.env.*
+!.env.example
+
+# Private operational notes and local diagnostics
+部署指南.md
+server_check_output.txt
+*.log
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Locally uploaded media: keep the empty directory with .gitkeep only
+music/*
+!music/.gitkeep

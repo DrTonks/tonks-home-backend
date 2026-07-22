@@ -1,0 +1,44 @@
+/*
+version now: 2
+从旧版本更新? 请看 Release 中的更改说明
+*/
+{
+    "version": 2, // 配置版本号，一般无需更改 (其实没用, 用来给自己看配置版本的)
+    "debug": false, // Flask 服务器的 debug 开关
+    "host": "0.0.0.0", // 监听地址, 0.0.0.0 表示所有; 注意: 如果还需要监听 ipv6 请求，请设置为 ::
+    "port": 9010, // 监听端口, 默认 9010
+    "secret": "replace-with-status-secret", // 密钥, 更新状态时使用
+    "status": 0, // 目前的状态 (整数)
+    "app_name": "系统桌面", //当前使用的软件名称
+    "status_list": [ // 状态列表, 索引从 0 开始, 对应上面的 status
+        { // status: 0
+            "id": 0, // 与索引相同，非必须，仅为方便查看 (建议加上)
+            "name": "APP", // 状态名称
+            "desc": "目前手机使用的应用，大概率在玩手机摸鱼。", // 状态描述
+            "color": "awake" // 状态颜色, 对应 templates/style.css 中的 .sleeping .awake 等类, 可自行前往修改
+        },
+        { // status: 1
+            "id": 1,
+            "name": "似了",
+            "desc": "睡似了或其他原因不在线，紧急情况请使用电话联系。",
+            "color": "sleeping"
+        }
+        // 还可添加更多，以此类推
+    ],
+    "other": { // 其他配置 (网页上的信息)
+        "user": "Your name", // 你的名字
+        "background": "", // 可选：背景图片 URL
+        "alpha": 0.85, // 卡片不透明度设置 (0 ~ 1), 0 为完全透明, 1 为完全不透明
+        "learn_more": "GitHub Repo", // 更多信息链接的提示, 默认为 github repo
+        "repo": "https://github.com/your-account/your-repository", // 更多信息链接的目标, 可填存储库链接
+        "more_text": "" // 内容将在状态信息和 "你可以通过这个页面知晓..." 中间插入 (不转义); ps: 可以在这里放你联系方式的链接
+    },
+    "admin_secret": "replace-with-admin-secret", // 管理员密钥, 用于音乐/日历/活动数据等管理接口
+    "github_token": "github_pat_xxx", // GitHub Personal Access Token, 用于获取贡献数据
+    "agent_activity": [], // Agent 活动热力图数据 [{ "date": "2026-07-03", "messageCount": 457, "sessionCount": 1, "toolCallCount": 1316 }]
+    "calendar_events": [], // 日历事件 [{ "id": "uuid", "date": "2026-07-15", "name": "事件名称", "type": "personal|holiday|work" }]
+    "blog_base_url": "https://example.com", // 博客 Atom/RSS 根地址
+    "blog_data_url": "https://example.com/data", // 博客数据 URL, 用于获取项目和时光机数据
+    "music_files": [], // 音乐文件列表 [{ "filename": "song.mp3", "title": "歌曲名", "artist": "艺术家" }]
+    "todos": [] // 待办事项 [{ "id": "uuid", "text": "待办内容", "done": false, "completed_at": null }]
+}
