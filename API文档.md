@@ -32,8 +32,7 @@
 
 | 方法 | 路径 | 认证 | 说明 |
 |------|------|------|------|
-| GET | `/` | 无 | 首页 HTML |
-| GET | `/style.css` | 无 | 动态 CSS |
+| GET | `/` | 无 | 服务健康信息 |
 | GET | `/query` | 无 | PC 当前状态 |
 | GET | `/get/status_list` | 无 | 全部状态定义 |
 | GET | `/online_count` | 无 | 在线人数统计 |
@@ -165,15 +164,13 @@ async getOnlineCount() {
 
 ---
 
-### GET `/` — 首页
+### GET `/` — 服务健康信息
 
-返回 HTML 页面（Jinja2 模板渲染），前端 SPA 不需要调用此接口。
+返回用于部署检查的 JSON：
 
----
-
-### GET `/style.css` — 动态 CSS
-
-返回 CSS 样式表，背景图 URL 和透明度由 data.json 配置控制。前端可直接在 `<link>` 中引用。
+```json
+{ "success": true, "service": "personal-status-server" }
+```
 
 ---
 

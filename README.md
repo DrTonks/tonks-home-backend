@@ -1,8 +1,8 @@
 # Personal Status Server
 
-一个面向个人使用的 Flask 后端：公开展示在线状态，接收桌面端状态上报，并提供日历、待办、音乐、博客摘要、GitHub 贡献和 Agent 活动热力图等接口。
+个人使用的纯 API Flask 后端：接收设备状态上报，并提供状态查询、日历、待办、音乐、博客摘要、GitHub 贡献和 Agent 活动热力图等接口。
 
-本仓库是基于早期 `sleepy` 项目深度改造而来，并不是原项目的镜像。它可作为搭建个人状态页或轻量个人仪表盘后端的参考。
+本仓库是基于早期 `sleepy` 项目深度改造而来。可作为搭建个人状态页或轻量个人仪表盘后端的参考。
 
 ## 功能
 
@@ -19,7 +19,7 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
 
 - Python 3.10+
 - Flask + Waitress
-- 原生 HTML/CSS/JavaScript 前端资源
+- JSON API；不包含内置网页前端
 
 ## 快速开始
 
@@ -39,7 +39,7 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
    Copy-Item example.jsonc data.json
    ```
 
-   编辑 `data.json`，至少替换 `secret`、`admin_secret`、用户名和仓库链接。`data.json` 已被 Git 忽略，不能提交。
+   编辑 `data.json`，至少替换 `secret`、`admin_secret`，并按需配置监听地址、博客和 GitHub 数据源。`data.json` 已被 Git 忽略，不能提交。
 
 3. 启动服务。
 
@@ -114,7 +114,3 @@ git diff --cached --check
 - 请为 `secret` 与 `admin_secret` 使用不同的随机值。
 - GitHub token 最小化授权，避免写入权限；不需要 GitHub 卡片时留空即可。
 - 服务对外开放前，请在反向代理、防火墙和访问日志层面做好限制。
-
-## 许可证与来源
-
-请在发布前补充你希望采用的 `LICENSE`。如果保留或复用了上游项目代码、资源或设计，请在此处补充上游仓库链接、许可证和归属说明。

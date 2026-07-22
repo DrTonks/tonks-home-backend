@@ -15,7 +15,7 @@ version now: 2
             "id": 0, // 与索引相同，非必须，仅为方便查看 (建议加上)
             "name": "APP", // 状态名称
             "desc": "目前手机使用的应用，大概率在玩手机摸鱼。", // 状态描述
-            "color": "awake" // 状态颜色, 对应 templates/style.css 中的 .sleeping .awake 等类, 可自行前往修改
+            "color": "awake" // 状态颜色标识，供 API 客户端自行映射样式
         },
         { // status: 1
             "id": 1,
@@ -25,14 +25,6 @@ version now: 2
         }
         // 还可添加更多，以此类推
     ],
-    "other": { // 其他配置 (网页上的信息)
-        "user": "Your name", // 你的名字
-        "background": "", // 可选：背景图片 URL
-        "alpha": 0.85, // 卡片不透明度设置 (0 ~ 1), 0 为完全透明, 1 为完全不透明
-        "learn_more": "GitHub Repo", // 更多信息链接的提示, 默认为 github repo
-        "repo": "https://github.com/your-account/your-repository", // 更多信息链接的目标, 可填存储库链接
-        "more_text": "" // 内容将在状态信息和 "你可以通过这个页面知晓..." 中间插入 (不转义); ps: 可以在这里放你联系方式的链接
-    },
     "admin_secret": "replace-with-admin-secret", // 管理员密钥, 用于音乐/日历/活动数据等管理接口
     "github_token": "github_pat_xxx", // GitHub Personal Access Token, 用于获取贡献数据
     "agent_activity": [], // Agent 活动热力图数据 [{ "date": "2026-07-03", "messageCount": 457, "sessionCount": 1, "toolCallCount": 1316 }]

@@ -3,7 +3,7 @@
 import utils as u
 from datetime import datetime, timedelta, timezone
 from data import data as data_init
-from flask import Flask, render_template, request, url_for, redirect, flash, make_response, send_from_directory
+from flask import Flask, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from waitress import serve
@@ -20,7 +20,7 @@ from markupsafe import escape
 
 d = data_init()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)
 # 如果前端通过反向代理（nginx）转发请求，请根据代理层数调整 x_for 值
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
@@ -523,41 +523,7 @@ def track_online():
 
 @app.route('/')
 def index():
-    d.load()
-    showip(request, '/')
-    ot = d.data['other']
-    try:
-        stat = d.data['status_list'][d.data['status']]
-        if(d.data['status'] == 0):
-            app_name = d.data['app_name']
-            stat['name'] = app_name
-    except:
-        stat = {
-            'name': '未知',
-            'desc': '未知的标识符，可能是配置问题。',
-            'color': 'error'
-        }
-    return render_template(
-        'index.html',
-        user=ot['user'],
-        learn_more=ot['learn_more'],
-        repo=ot['repo'],
-        status_name=stat['name'],
-        status_desc=stat['desc'],
-        status_color=stat['color'],
-        more_text=ot['more_text']
-    )
-
-
-@app.route('/style.css')
-def style_css():
-    response = make_response(render_template(
-        'style.css',
-        bg=d.data['other']['background'],
-        alpha=d.data['other']['alpha']
-    ))
-    response.mimetype = 'text/css'
-    return response
+    return u.format_dict({'success': True, 'service': 'personal-status-server'})
 
 
 @app.route('/query')
@@ -622,9 +588,8 @@ def set_normal():
     if timestamp is not None:
         try:
             timestamp = int(timestamp)
-            d.dset('timestamp', timestamp)
-        except:
-            pass  # 可加日志
+        except (TypeError, ValueError):
+            timestamp = None
     try:
         status = int(status)
     except:
@@ -632,8 +597,8 @@ def set_normal():
             code='bad request',
             message="argument 'status' must be a number"
         )
-    secret = escape(request.args.get("secret"))
-    u.info(f'status: {status}, name: {app_name}, secret: "{secret}"')
+    secret = request.args.get("secret", "")
+    u.info(f'status update requested: status={status}, app_name={app_name}')
     secret_real = d.dget('secret')
     if secret == secret_real:
         # 用写锁保护写操作，一次性保存避免多次磁盘写入
@@ -641,6 +606,8 @@ def set_normal():
             d.load()
             d.data['status'] = status
             d.data['app_name'] = app_name
+            if timestamp is not None:
+                d.data['timestamp'] = timestamp
             d.save()
         u.info('set success')
         ret = {
@@ -697,12 +664,15 @@ def agent_activity():
             date = a.get('date', '')
             if not date:
                 continue
-            normalized.append({
-                'date': str(date),
-                'messageCount': int(a.get('messageCount', 0)),
-                'sessionCount': int(a.get('sessionCount', 0)),
-                'toolCallCount': int(a.get('toolCallCount', 0))
-            })
+            try:
+                normalized.append({
+                    'date': str(date),
+                    'messageCount': int(a.get('messageCount', 0)),
+                    'sessionCount': int(a.get('sessionCount', 0)),
+                    'toolCallCount': int(a.get('toolCallCount', 0))
+                })
+            except (TypeError, ValueError):
+                return reterr(code='bad request', message='activity counts must be integers')
 
         with write_lock:
             d.load()

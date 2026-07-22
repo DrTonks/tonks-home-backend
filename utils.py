@@ -1,6 +1,6 @@
 from datetime import datetime
 import json
-import os
+from flask import Response
 
 
 def info(log):
@@ -24,4 +24,11 @@ def format_dict(dic):
     列表 -> 格式化 json
     @param dic: 列表
     '''
-    return json.dumps(dic, indent=4, ensure_ascii=False, sort_keys=False, separators=(', ', ': '))
+    payload = json.dumps(
+        dic,
+        indent=4,
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(', ', ': '),
+    )
+    return Response(payload, mimetype='application/json')

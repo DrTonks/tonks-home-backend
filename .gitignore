@@ -9,6 +9,9 @@ local.env.bat
 部署指南.md
 server_check_output.txt
 *.log
+task_plan.md
+findings.md
+progress.md
 
 # Python build/runtime artifacts
 __pycache__/
