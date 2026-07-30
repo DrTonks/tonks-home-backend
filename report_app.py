@@ -57,6 +57,8 @@ APP_MAP = {
     "Postman.exe": "Postman",
     "GitHubDesktop.exe": "GitHub Desktop",
     "obs64.exe": "OBS Studio",
+    "Obsidian.exe": "Obsidian",
+    "ChatGPT.exe": "ChatGPT",
 }
 
 SERVER_URL = os.environ.get('SLEEPY_SERVER_URL', 'http://127.0.0.1:9010').rstrip('/') + '/set'

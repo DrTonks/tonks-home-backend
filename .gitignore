@@ -1,5 +1,8 @@
 # Private runtime configuration and state
 data.json
+analytics.sqlite3
+analytics.sqlite3-shm
+analytics.sqlite3-wal
 local.env.bat
 .env
 .env.*
@@ -18,6 +21,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.test-tmp/
 .coverage
 htmlcov/
 .venv/

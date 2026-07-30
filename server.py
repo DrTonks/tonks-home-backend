@@ -6,7 +6,6 @@ from data import data as data_init
 from flask import Flask, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
-from waitress import serve
 import threading
 import time
 import os
@@ -15,14 +14,36 @@ import json
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
+import hashlib
+import re
 from markupsafe import escape
+from analytics import BlogAnalytics
 
 
 d = data_init()
+blog_analytics = BlogAnalytics()
 
 app = Flask(__name__, static_folder=None)
 # 如果前端通过反向代理（nginx）转发请求，请根据代理层数调整 x_for 值
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
+
+@app.after_request
+def add_configured_cors_headers(response):
+    """Allow explicitly configured origins for deployments without a same-origin proxy."""
+    origin = request.headers.get('Origin', '')
+    allowed_origins = {
+        item.strip()
+        for item in os.environ.get('SLEEPY_CORS_ORIGINS', '').split(',')
+        if item.strip()
+    }
+    if origin and origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Client-ID'
+        response.headers['Vary'] = 'Origin'
+    return response
+
 
 # === 音乐文件存储目录 ===
 MUSIC_DIR = os.environ.get('SLEEPY_MUSIC_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'music'))
@@ -72,6 +93,8 @@ def get_online_count():
 # 写锁，保护对 data.json 的写入
 write_lock = threading.Lock()
 
+BLOG_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
+
 # --- 辅助函数 ---
 
 
@@ -108,6 +131,33 @@ def get_request_key(req):
     if xff:
         return "ip:" + xff.split(',')[0].strip()
     return f'ip:{req.remote_addr}'
+
+
+def normalize_blog_slug(value):
+    """Validate and normalize the public Astro article slug."""
+    slug = str(value or '').strip().strip('/')
+    if (
+        not slug
+        or '..' in slug
+        or '//' in slug
+        or not BLOG_SLUG_RE.fullmatch(slug)
+    ):
+        return None
+    return slug
+
+
+def get_blog_visitor_hash(req):
+    """Return an anonymous stable identifier without storing a raw IP."""
+    client_id = req.headers.get('X-Client-ID') or req.headers.get('X-Client-Id')
+    if client_id:
+        identity = f'cid:{str(client_id)[:200]}'
+    else:
+        forwarded = req.headers.get('X-Forwarded-For', '')
+        ip = forwarded.split(',')[0].strip() if forwarded else (req.remote_addr or '')
+        user_agent = req.headers.get('User-Agent', '')[:300]
+        identity = f'ip:{ip}|ua:{user_agent}'
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(d.dget('admin_secret') or '')
+    return hashlib.sha256(f'{salt}|{identity}'.encode('utf-8')).hexdigest()
 
 
 # === 管理员认证 ===
@@ -169,7 +219,7 @@ def calc_heatmap_intensity(activities):
 
 def fetch_blog_rss(count=2):
     """获取最新博客文章，先尝试 Atom 再尝试 RSS 2.0"""
-    blog_base_url = d.data.get('blog_base_url', 'https://example.com').rstrip('/')
+    blog_base_url = d.data.get('blog_base_url', 'https://blog.tonks.top').rstrip('/')
     atom_url = f'{blog_base_url}/atom.xml'
     rss_url = f'{blog_base_url}/rss.xml'
     posts = []
@@ -323,7 +373,7 @@ def _extract_images(entry):
 
 def fetch_blog_extra():
     """获取博客的额外数据：按时间倒序取最新的项目和时光机条目"""
-    blog_data_url = d.data.get('blog_data_url', 'https://example.com/data').rstrip('/')
+    blog_data_url = d.data.get('blog_data_url', 'https://blog.tonks.top/data').rstrip('/')
     result = {'featuredProject': None, 'featuredTimeline': None}
 
     # 获取最新项目（按 startDate 降序）
@@ -724,6 +774,51 @@ def blog_posts():
         'featuredProject': extra['featuredProject'],
         'featuredTimeline': extra['featuredTimeline']
     })
+
+
+@app.route('/blog/views', methods=['GET'])
+def blog_views():
+    """Batch-read view totals for article slugs."""
+    raw_slugs = request.args.getlist('slugs')
+    if len(raw_slugs) == 1 and ',' in raw_slugs[0]:
+        raw_slugs = raw_slugs[0].split(',')
+    if len(raw_slugs) > 100:
+        return reterr(code='bad request', message='at most 100 slugs are allowed')
+
+    slugs = []
+    for raw_slug in raw_slugs:
+        slug = normalize_blog_slug(raw_slug)
+        if slug is None:
+            return reterr(code='bad request', message=f'invalid article slug: {raw_slug}')
+        slugs.append(slug)
+
+    response = u.format_dict({
+        'success': True,
+        'views': blog_analytics.get_views(slugs),
+    })
+    response.headers['Cache-Control'] = 'public, max-age=60'
+    return response
+
+
+@app.route('/blog/views/<path:slug>', methods=['POST'])
+def record_blog_view(slug):
+    """Count at most one view per anonymous visitor and 30-minute bucket."""
+    normalized_slug = normalize_blog_slug(slug)
+    if normalized_slug is None:
+        return reterr(code='bad request', message='invalid article slug')
+
+    views, counted = blog_analytics.record_view(
+        normalized_slug,
+        get_blog_visitor_hash(request),
+    )
+    response = u.format_dict({
+        'success': True,
+        'slug': normalized_slug,
+        'views': views,
+        'counted': counted,
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 # === 博客图片服务 ===
@@ -1231,6 +1326,8 @@ def todos():
 
 
 if __name__ == '__main__':
+    from waitress import serve
+
     d.load()
     serve(app,
         host=d.data['host'],

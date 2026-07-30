@@ -1,5 +1,20 @@
 # Personal Status Server
 
+## 文章浏览量
+
+文章浏览量存放在独立的 `analytics.sqlite3` 中，首次访问统计接口时自动创建，
+不会对 `data.json` 做高频整文件写入。同一匿名访客、同一文章在 30 分钟内只计一次。
+
+- `SLEEPY_ANALYTICS_DB`：可选，覆盖 SQLite 文件路径。
+- `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `admin_secret`。
+- `SLEEPY_CORS_ORIGINS`：可选，逗号分隔的允许来源；同源反向代理部署无需配置。
+
+完整回归测试：
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 个人使用的纯 API Flask 后端：接收设备状态上报，并提供状态查询、日历、待办、音乐、博客摘要、GitHub 贡献和 Agent 活动热力图等接口。
 
 本仓库是基于早期 `sleepy` 项目深度改造而来。可作为搭建个人状态页或轻量个人仪表盘后端的参考。

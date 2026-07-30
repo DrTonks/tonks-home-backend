@@ -1,7 +1,7 @@
 @echo off
 title Personal Status Service
 
-cd /d "%~dp0"
+cd /d "D:\myserver\sleepy"
 if not exist "local.env.bat" (
     echo [ERROR] Missing local.env.bat
     echo Copy local.env.bat.example to local.env.bat and fill in your private values.

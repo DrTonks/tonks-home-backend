@@ -296,6 +296,42 @@ async getAgentActivity() {
 
 ---
 
+### GET `/blog/views` — 批量读取文章浏览量
+
+重复传入 `slugs` 查询参数，一次读取当前页面所有文章的浏览量，最多 100 篇：
+
+```http
+GET /blog/views?slugs=first-post&slugs=folder/second-post
+```
+
+```json
+{
+  "success": true,
+  "views": {
+    "first-post": 12,
+    "folder/second-post": 8
+  }
+}
+```
+
+### POST `/blog/views/<slug>` — 记录文章浏览
+
+进入文章详情页时调用。服务端根据 `X-Client-ID`（缺失时使用 IP 与 User-Agent）
+生成不可逆匿名哈希，同一访客、同一文章在 30 分钟时间桶内只计一次。
+
+```json
+{
+  "success": true,
+  "slug": "folder/second-post",
+  "views": 9,
+  "counted": true
+}
+```
+
+浏览量存放在独立的 `analytics.sqlite3`，不会对 `data.json` 做高频整文件写入。
+
+---
+
 ### GET `/blog-posts` — 最新博客文章 + 精选项目/时间线
 
 从 blog.example.com 获取最新文章 (Atom/RSS)，同时附加最新的项目和时光机条目（按 `startDate` 降序排列，取最新一条）。
