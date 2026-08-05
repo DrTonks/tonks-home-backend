@@ -1,0 +1,19 @@
+# 所有文本文件统一使用 LF 换行符
+* text=auto
+
+# Python 文件
+*.py text eol=lf
+*.bat text eol=crlf
+
+# 文档
+*.md text eol=lf
+*.txt text eol=lf
+*.jsonc text eol=lf
+*.macro text eol=lf
+
+# 二进制文件不做转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
