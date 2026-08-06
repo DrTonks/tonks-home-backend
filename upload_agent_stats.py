@@ -15,6 +15,7 @@
 
 import json
 import os
+import platform
 import sys
 import urllib.request
 import urllib.error
@@ -308,10 +309,22 @@ def update_stats_cache(cache_path=None):
 
 # === 上传 ===
 
-def upload_stats(server_url, secret, activities):
-    """上传 dailyActivity 到服务器"""
+def get_machine_id():
+    """返回本机标识，优先读取环境变量 SLEEPY_MACHINE_ID，否则使用 hostname"""
+    env_id = os.environ.get('SLEEPY_MACHINE_ID')
+    if env_id:
+        return env_id
+    return platform.node()
+
+
+def upload_stats(server_url, secret, machine_id, activities):
+    """上传 dailyActivity 到服务器（携带 machineId）"""
     url = f"{server_url.rstrip('/')}/agent-activity?secret={secret}"
-    data = json.dumps(activities, ensure_ascii=False).encode('utf-8')
+    payload = {
+        "machineId": machine_id,
+        "dailyActivity": activities,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
 
     req = urllib.request.Request(
         url,
@@ -382,6 +395,8 @@ def main():
     total_tool_calls = sum(a.get('toolCallCount', 0) for a in recent)
 
     print(f'\n[3/3] 准备上传:')
+    machine_id = get_machine_id()
+    print(f'  机器标识: {machine_id}')
     print(f'  日期范围: {date_range}')
     print(f'  记录数: {len(recent)}')
     print(f'  总消息数: {total_msgs}')
@@ -394,7 +409,7 @@ def main():
         return
 
     print(f'\n上传到: {args.server}')
-    result = upload_stats(args.server, args.secret, recent)
+    result = upload_stats(args.server, args.secret, machine_id, recent)
 
     if result.get('success'):
         new = result.get('new', result.get('count', '?'))

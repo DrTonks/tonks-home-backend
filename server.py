@@ -17,11 +17,12 @@ import urllib.error
 import hashlib
 import re
 from markupsafe import escape
-from analytics import BlogAnalytics
+from analytics import BlogAnalytics, AgentActivityStore
 
 
 d = data_init()
 blog_analytics = BlogAnalytics()
+agent_store = AgentActivityStore()
 
 app = Flask(__name__, static_folder=None)
 # 如果前端通过反向代理（nginx）转发请求，请根据代理层数调整 x_for 值
@@ -678,7 +679,7 @@ def set_normal():
 
 @app.route('/agent-activity', methods=['GET', 'POST'])
 def agent_activity():
-    """GET: 返回带强度等级的活动数据；POST: 上传活动数据（需管理员密钥）"""
+    """GET: 返回带强度等级的活动数据（跨机器聚合）；POST: 上传活动数据（需管理员密钥）"""
     if request.method == 'POST':
         # 管理员认证
         auth_err = require_admin()
@@ -693,20 +694,24 @@ def agent_activity():
         if body is None:
             return reterr(code='bad request', message='request body is required')
 
+        # ---- 解析 machineId + dailyActivity ----
         try:
             if isinstance(body, list):
+                # 旧格式：裸数组，无 machineId
+                machine_id = 'unknown'
                 activities = body
             elif isinstance(body, dict):
+                machine_id = str(body.get('machineId') or 'unknown')
                 activities = body.get('dailyActivity', body.get('activities', []))
             else:
                 return reterr(code='bad request', message='expected JSON object or array')
-        except AttributeError:
+        except (AttributeError, TypeError):
             return reterr(code='bad request', message='expected JSON object or array')
 
         if not isinstance(activities, list):
             return reterr(code='bad request', message="expected JSON array of activities")
 
-        # 验证并归一化数据
+        # ---- 验证并归一化 ----
         normalized = []
         for a in activities:
             if not isinstance(a, dict):
@@ -724,28 +729,26 @@ def agent_activity():
             except (TypeError, ValueError):
                 return reterr(code='bad request', message='activity counts must be integers')
 
-        with write_lock:
-            d.load()
-            existing = d.data.get('agent_activity', [])
-            # 按日期合并：新数据覆盖同日旧数据
-            merged = {e['date']: e for e in existing}
-            for a in normalized:
-                merged[a['date']] = a
-            # 清理超过 365 天的旧记录
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime('%Y-%m-%d')
-            kept = [v for v in merged.values() if v['date'] >= cutoff]
-            kept.sort(key=lambda x: x['date'])
-            d.dset('agent_activity', kept)
-            new_count = len(normalized)
-            total = len(kept)
-            removed = len(merged) - total
+        if not normalized:
+            return u.format_dict({'success': True, 'code': 'OK', 'new': 0, 'total': 0, 'note': 'no valid activities to upsert'})
 
-        u.info(f'Agent activity updated: {new_count} new, {total} total, {removed} expired removed')
-        return u.format_dict({'success': True, 'code': 'OK', 'new': new_count, 'total': total, 'removed': removed})
+        # ---- 写入 SQLite（同一 machine+date 覆盖，不同 machine 共存） ----
+        new_count, total = agent_store.upsert_activities(machine_id, normalized)
+
+        u.info(f'Agent activity updated [{machine_id}]: {new_count} upserted, {total} total rows')
+        return u.format_dict({
+            'success': True, 'code': 'OK',
+            'new': new_count, 'total': total, 'machineId': machine_id,
+        })
 
     # GET: 返回热力图数据
+    # 首次访问时尝试从 data.json 迁移旧数据（仅当 SQLite 仍为空时）
     d.load()
-    activities = d.data.get('agent_activity', [])
+    legacy = d.data.get('agent_activity', [])
+    if legacy:
+        agent_store.migrate_from_json(legacy)
+
+    activities = agent_store.get_aggregated_activities()
     if not activities:
         return u.format_dict({'success': True, 'activities': [], 'note': 'No activity data yet. POST to this endpoint with admin secret to upload.'})
 

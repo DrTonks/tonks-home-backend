@@ -63,6 +63,7 @@ def setUpModule():
     )
     os.environ["SLEEPY_MUSIC_DIR"] = str(root / "music")
     os.environ["SLEEPY_ANALYTICS_DB"] = str(root / "analytics.sqlite3")
+    os.environ["SLEEPY_AGENT_ACTIVITY_DB"] = str(root / "agent_activity.sqlite3")
     os.environ["SLEEPY_ANALYTICS_SALT"] = "analytics-test-salt"
     os.environ["SLEEPY_CORS_ORIGINS"] = "http://127.0.0.1:4321"
     os.chdir(root)
@@ -78,6 +79,7 @@ def tearDownModule():
     for name in (
         "SLEEPY_MUSIC_DIR",
         "SLEEPY_ANALYTICS_DB",
+        "SLEEPY_AGENT_ACTIVITY_DB",
         "SLEEPY_ANALYTICS_SALT",
         "SLEEPY_CORS_ORIGINS",
     ):
@@ -103,11 +105,17 @@ class AllApiRoutesTest(unittest.TestCase):
             path = root / f"analytics.sqlite3{suffix}"
             if path.exists():
                 path.unlink()
+            path = root / f"agent_activity.sqlite3{suffix}"
+            if path.exists():
+                path.unlink()
         for path in (root / "music").iterdir():
             path.unlink()
         backend.d.load()
         backend.blog_analytics = backend.BlogAnalytics(
             str(root / "analytics.sqlite3")
+        )
+        backend.agent_store = backend.AgentActivityStore(
+            str(root / "agent_activity.sqlite3")
         )
         backend.online_users.clear()
         self.client = backend.app.test_client()
@@ -222,6 +230,101 @@ class AllApiRoutesTest(unittest.TestCase):
         result = self.json(self.client.get("/agent-activity"))
         self.assertEqual(result["activities"][0]["messageCount"], 4)
         self.assertIn("intensity", result["activities"][0])
+
+    def test_agent_activity_multi_machine_summing(self):
+        """两台机器同日上报 → 加总；同机器同日重复上报 → 覆盖"""
+        admin_qs = {"secret": TEST_CONFIG["admin_secret"]}
+        date = "2026-08-06"
+
+        # --- 1. Windows 上报 ---
+        r1 = self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json={
+                    "machineId": "windows-pc",
+                    "dailyActivity": [
+                        {"date": date, "messageCount": 10, "sessionCount": 2, "toolCallCount": 5}
+                    ],
+                },
+            )
+        )
+        self.assertTrue(r1["success"])
+        self.assertEqual(r1["machineId"], "windows-pc")
+
+        # --- 2. Mac 同日上报 → 应加总 ---
+        r2 = self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json={
+                    "machineId": "macbook",
+                    "dailyActivity": [
+                        {"date": date, "messageCount": 20, "sessionCount": 3, "toolCallCount": 8}
+                    ],
+                },
+            )
+        )
+        self.assertTrue(r2["success"])
+
+        agg = self.json(self.client.get("/agent-activity"))
+        day = agg["activities"][0]
+        self.assertEqual(day["date"], date)
+        self.assertEqual(day["messageCount"], 30)    # 10 + 20
+        self.assertEqual(day["sessionCount"], 5)     # 2 + 3
+        self.assertEqual(day["toolCallCount"], 13)   # 5 + 8
+
+        # --- 3. Windows 再次上报同日（值变了）→ 应覆盖而非再加 ---
+        r3 = self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json={
+                    "machineId": "windows-pc",
+                    "dailyActivity": [
+                        {"date": date, "messageCount": 15, "sessionCount": 1, "toolCallCount": 3}
+                    ],
+                },
+            )
+        )
+        self.assertTrue(r3["success"])
+
+        agg2 = self.json(self.client.get("/agent-activity"))
+        day2 = agg2["activities"][0]
+        self.assertEqual(day2["messageCount"], 35)    # 15 + 20 (windows覆盖为15, mac仍是20)
+        self.assertEqual(day2["sessionCount"], 4)     # 1 + 3
+        self.assertEqual(day2["toolCallCount"], 11)   # 3 + 8
+
+        # --- 4. 多日跨机器 ---
+        day2_date = "2026-08-07"
+        self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json={
+                    "machineId": "windows-pc",
+                    "dailyActivity": [
+                        {"date": day2_date, "messageCount": 5, "sessionCount": 1, "toolCallCount": 2}
+                    ],
+                },
+            )
+        )
+        agg3 = self.json(self.client.get("/agent-activity"))
+        self.assertEqual(len(agg3["activities"]), 2)  # 两天
+        self.assertEqual(agg3["activities"][1]["date"], day2_date)
+
+        # --- 5. 向后兼容：老格式（裸数组，无 machineId） ---
+        r5 = self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json=[
+                    {"date": "2026-08-08", "messageCount": 7, "sessionCount": 1, "toolCallCount": 4}
+                ],
+            )
+        )
+        self.assertTrue(r5["success"])
+        self.assertEqual(r5["machineId"], "unknown")
 
     def test_blog_posts_and_article_views(self):
         posts = [
