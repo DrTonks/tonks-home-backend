@@ -274,7 +274,8 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(day["sessionCount"], 5)     # 2 + 3
         self.assertEqual(day["toolCallCount"], 13)   # 5 + 8
 
-        # --- 3. Windows 再次上报同日（值变了）→ 应覆盖而非再加 ---
+        # --- 3. Windows 再次上报同日（messageCount 升，sessionCount/toolCallCount 降）→
+        #     只升不降：messageCount 应更新为 15，sessionCount 保持 2，toolCallCount 保持 5 ---
         r3 = self.json(
             self.client.post(
                 "/agent-activity",
@@ -291,9 +292,9 @@ class AllApiRoutesTest(unittest.TestCase):
 
         agg2 = self.json(self.client.get("/agent-activity"))
         day2 = agg2["activities"][0]
-        self.assertEqual(day2["messageCount"], 35)    # 15 + 20 (windows覆盖为15, mac仍是20)
-        self.assertEqual(day2["sessionCount"], 4)     # 1 + 3
-        self.assertEqual(day2["toolCallCount"], 11)   # 3 + 8
+        self.assertEqual(day2["messageCount"], 35)    # 15 + 20 (messageCount 升，接受)
+        self.assertEqual(day2["sessionCount"], 5)     # 2 + 3  (sessionCount 降，保持旧值)
+        self.assertEqual(day2["toolCallCount"], 13)   # 5 + 8  (toolCallCount 降，保持旧值)
 
         # --- 4. 多日跨机器 ---
         day2_date = "2026-08-07"
@@ -325,6 +326,27 @@ class AllApiRoutesTest(unittest.TestCase):
         )
         self.assertTrue(r5["success"])
         self.assertEqual(r5["machineId"], "unknown")
+
+        # --- 6. 只升不降：值全部下降 → 全部被拒绝，保留旧值 ---
+        r6 = self.json(
+            self.client.post(
+                "/agent-activity",
+                query_string=admin_qs,
+                json={
+                    "machineId": "windows-pc",
+                    "dailyActivity": [
+                        {"date": "2026-08-06", "messageCount": 5, "sessionCount": 0, "toolCallCount": 0}
+                    ],
+                },
+            )
+        )
+        self.assertTrue(r6["success"])
+        agg6 = self.json(self.client.get("/agent-activity"))
+        day6 = [a for a in agg6["activities"] if a["date"] == "2026-08-06"][0]
+        # 旧值应是: messageCount=15(windows)+20(mac)=35, sessionCount=2+3=5, toolCallCount=5+8=13
+        self.assertEqual(day6["messageCount"], 35)
+        self.assertEqual(day6["sessionCount"], 5)
+        self.assertEqual(day6["toolCallCount"], 13)
 
     def test_blog_posts_and_article_views(self):
         posts = [

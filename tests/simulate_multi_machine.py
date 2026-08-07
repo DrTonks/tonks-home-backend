@@ -145,9 +145,9 @@ def main():
         print("  OK: 所有日期聚合正确，跨机器已加总")
 
         # ================================================================
-        # 测试 4: 同一机器重复上报 → 应覆盖而非累加
+        # 测试 4: 同一机器重复上报 → 只升不降
         # ================================================================
-        print("--- 测试 4: Windows PC 重复上报 (同机器同日 → 覆盖) ---")
+        print("--- 测试 4: Windows PC 重复上报 (值全部上升 → 接受) ---")
         r = post_activity({
             "machineId": "windows-pc",
             "dailyActivity": [
@@ -159,8 +159,26 @@ def main():
         agg2 = get_activity()
         for a in agg2["activities"]:
             if a["date"] == "2026-08-06":
-                assert a["messageCount"] == 400, f"覆盖失败: {a['messageCount']} != 400"
-                print(f"  OK: messageCount={a['messageCount']} (400=覆盖值, 不是 700)")
+                assert a["messageCount"] == 400, f"上升失败: {a['messageCount']} != 400"
+                print(f"  OK: messageCount={a['messageCount']} (上升, 不是累加)")
+
+        # 测试 4b: 值全部下降 → 应被拒绝，保留旧值
+        print("--- 测试 4b: Windows PC 重复上报 (值全部下降 → 拒绝) ---")
+        r = post_activity({
+            "machineId": "windows-pc",
+            "dailyActivity": [
+                {"date": "2026-08-06", "messageCount": 5, "sessionCount": 0, "toolCallCount": 0},
+            ],
+        })
+        assert r.get("success"), f"上报失败: {r}"
+
+        agg2b = get_activity()
+        for a in agg2b["activities"]:
+            if a["date"] == "2026-08-06":
+                assert a["messageCount"] == 400, f"下降应被拒绝: msg={a['messageCount']} != 400"
+                assert a["sessionCount"] == 7, f"下降应被拒绝: sess={a['sessionCount']} != 7"
+                assert a["toolCallCount"] == 150, f"下降应被拒绝: tool={a['toolCallCount']} != 150"
+                print(f"  OK: 值被拒绝，保留旧值 msg={a['messageCount']}")
 
         # ================================================================
         # 测试 5: 老格式向后兼容（裸数组）

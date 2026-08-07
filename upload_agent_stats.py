@@ -287,7 +287,17 @@ def update_stats_cache(cache_path=None):
         for a in existing['dailyActivity']:
             merged[a['date']] = a
         for a in new_activities:
-            merged[a['date']] = a  # 新数据覆盖同日旧数据
+            date = a['date']
+            if date in merged:
+                # 只升不降：保留旧缓存和新计算中的较大值
+                merged[date]['messageCount'] = max(
+                    merged[date]['messageCount'], a['messageCount'])
+                merged[date]['sessionCount'] = max(
+                    merged[date]['sessionCount'], a['sessionCount'])
+                merged[date]['toolCallCount'] = max(
+                    merged[date]['toolCallCount'], a['toolCallCount'])
+            else:
+                merged[date] = a
         merged_activities = sorted(merged.values(), key=lambda x: x['date'])
     else:
         merged_activities = new_activities

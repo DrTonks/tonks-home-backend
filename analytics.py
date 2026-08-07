@@ -208,9 +208,11 @@ class AgentActivityStore:
     ) -> tuple[int, int]:
         """Upsert *activities* for *machine_id*.
 
-        Same (date, machine_id) → replaced (the client always sends a
-        full re-computation for that day).  Different machine_id →
-        separate row kept independently.
+        Same (date, machine_id) → only increases, never decreases
+        (the client may re-compute lower values when session files are
+        cleaned up, but historical activity should never shrink).
+
+        Different machine_id → separate row kept independently.
 
         Returns ``(new_or_updated, total_rows_after)``.
         """
@@ -222,10 +224,15 @@ class AgentActivityStore:
             for a in activities:
                 connection.execute(
                     """
-                    INSERT OR REPLACE INTO agent_activity
+                    INSERT INTO agent_activity
                         (date, machine_id, message_count,
                          session_count, tool_call_count, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(date, machine_id) DO UPDATE SET
+                        message_count  = MAX(message_count,  excluded.message_count),
+                        session_count  = MAX(session_count,  excluded.session_count),
+                        tool_call_count = MAX(tool_call_count, excluded.tool_call_count),
+                        updated_at     = excluded.updated_at
                     """,
                     (
                         str(a["date"]),
