@@ -1,5 +1,10 @@
 #!/usr/bin/python3
 # coding: utf-8
+import os
+from runtime_env import configured_value, load_env_file, migrate_sensitive_data_keys
+
+load_env_file(os.environ.get('SLEEPY_ENV_FILE') or None)
+
 import utils as u
 from datetime import datetime, timedelta, timezone
 from data import data as data_init
@@ -8,7 +13,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 import threading
 import time
-import os
 import uuid
 import json
 import xml.etree.ElementTree as ET
@@ -18,13 +22,34 @@ import hashlib
 import re
 from markupsafe import escape
 from analytics import BlogAnalytics, AgentActivityStore
+from pet_ai import create_pet_ai_blueprint
+from recommendations import (
+    RecommendationRateLimiter,
+    RecommendationRateLimitExceeded,
+    RecommendationStore,
+    RecommendationValidationError,
+    recommendation_limit_from_env,
+    validate_recommendation_filters,
+    validate_recommendation_payload,
+)
 
 
 d = data_init()
+migrate_sensitive_data_keys(d)
 blog_analytics = BlogAnalytics()
 agent_store = AgentActivityStore()
+recommendation_store = RecommendationStore()
+recommendation_limiter = RecommendationRateLimiter(
+    minute_limit=recommendation_limit_from_env(
+        'SLEEPY_RECOMMENDATION_MINUTE_LIMIT', 6, 60
+    ),
+    daily_limit=recommendation_limit_from_env(
+        'SLEEPY_RECOMMENDATION_DAILY_LIMIT', 30, 1000
+    ),
+)
 
 app = Flask(__name__, static_folder=None)
+app.register_blueprint(create_pet_ai_blueprint())
 # 如果前端通过反向代理（nginx）转发请求，请根据代理层数调整 x_for 值
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
@@ -40,7 +65,7 @@ def add_configured_cors_headers(response):
     }
     if origin and origin in allowed_origins:
         response.headers['Access-Control-Allow-Origin'] = origin
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Client-ID'
         response.headers['Vary'] = 'Origin'
     return response
@@ -157,7 +182,9 @@ def get_blog_visitor_hash(req):
         ip = forwarded.split(',')[0].strip() if forwarded else (req.remote_addr or '')
         user_agent = req.headers.get('User-Agent', '')[:300]
         identity = f'ip:{ip}|ua:{user_agent}'
-    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(d.dget('admin_secret') or '')
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
     return hashlib.sha256(f'{salt}|{identity}'.encode('utf-8')).hexdigest()
 
 
@@ -166,7 +193,7 @@ def get_blog_visitor_hash(req):
 def verify_admin_secret():
     """验证管理员密钥（从 URL query param ?secret=xxx 传入）"""
     secret = request.args.get("secret", "")
-    admin_secret = d.dget('admin_secret')
+    admin_secret = configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
     return secret == admin_secret and secret != ""
 
 
@@ -175,6 +202,90 @@ def require_admin():
     if not verify_admin_secret():
         return reterr(code='not authorized', message='invalid admin secret')
     return None
+
+
+# === 桌宠推荐 ===
+
+def get_recommendation_rate_limit_keys(req):
+    """Return separate anonymous IP and client hashes without storing raw identifiers."""
+    client_id = str(req.headers.get('X-Client-ID') or 'missing')[:80]
+    remote = req.remote_addr or 'unknown'
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    ip_key = hashlib.sha256(f'{salt}|recommendation-ip|{remote}'.encode('utf-8')).hexdigest()
+    client_key = hashlib.sha256(
+        f'{salt}|recommendation-client|{client_id}'.encode('utf-8')
+    ).hexdigest()
+    return ip_key, client_key
+
+
+@app.route('/pet/recommendations', methods=['GET', 'POST'])
+def pet_recommendations():
+    """Submit or list song/book/game/anime recommendations for the site author."""
+    if request.method == 'POST':
+        if request.content_length is not None and request.content_length > 1024:
+            return reterr(code='body too large', message='request body exceeds 1024 bytes')
+        try:
+            payload = request.get_json(force=False, silent=False)
+            category, content, user_name = validate_recommendation_payload(payload)
+            recommendation_limiter.check(*get_recommendation_rate_limit_keys(request))
+        except RecommendationValidationError as exc:
+            return reterr(code=exc.code, message=exc.message)
+        except RecommendationRateLimitExceeded:
+            return reterr(code='rate limited', message='recommendation limit exceeded')
+        except Exception:
+            return reterr(code='invalid JSON', message='expected a JSON object')
+
+        try:
+            recommendation = recommendation_store.create(category, content, user_name)
+        except Exception:
+            return reterr(code='server error', message='failed to save recommendation')
+        return u.format_dict({
+            'success': True,
+            'code': 'OK',
+            'recommendation': recommendation,
+        })
+
+    try:
+        category, created_date = validate_recommendation_filters(
+            request.args.get('category'),
+            request.args.get('date'),
+        )
+    except RecommendationValidationError as exc:
+        return reterr(code=exc.code, message=exc.message)
+    try:
+        recommendations = recommendation_store.list(
+            category=category,
+            created_date=created_date,
+        )
+    except Exception:
+        return reterr(code='server error', message='failed to read recommendations')
+    return u.format_dict({
+        'success': True,
+        'recommendations': recommendations,
+        'count': len(recommendations),
+        'filters': {'category': category, 'date': created_date},
+    })
+
+
+@app.route('/pet/recommendations/<int:recommendation_id>', methods=['DELETE'])
+def delete_pet_recommendation(recommendation_id):
+    """Delete one recommendation using the existing administrator secret."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err
+    try:
+        deleted = recommendation_store.delete(recommendation_id)
+    except Exception:
+        return reterr(code='server error', message='failed to delete recommendation')
+    if not deleted:
+        return reterr(code='not found', message='recommendation not found')
+    return u.format_dict({
+        'success': True,
+        'code': 'OK',
+        'deleted': recommendation_id,
+    })
 
 
 # === 热力图强度计算 ===
@@ -220,7 +331,9 @@ def calc_heatmap_intensity(activities):
 
 def fetch_blog_rss(count=2):
     """获取最新博客文章，先尝试 Atom 再尝试 RSS 2.0"""
-    blog_base_url = d.data.get('blog_base_url', 'https://blog.tonks.top').rstrip('/')
+    blog_base_url = os.environ.get(
+        'SLEEPY_BLOG_BASE_URL', d.data.get('blog_base_url', 'https://blog.tonks.top')
+    ).rstrip('/')
     atom_url = f'{blog_base_url}/atom.xml'
     rss_url = f'{blog_base_url}/rss.xml'
     posts = []
@@ -374,7 +487,9 @@ def _extract_images(entry):
 
 def fetch_blog_extra():
     """获取博客的额外数据：按时间倒序取最新的项目和时光机条目"""
-    blog_data_url = d.data.get('blog_data_url', 'https://blog.tonks.top/data').rstrip('/')
+    blog_data_url = os.environ.get(
+        'SLEEPY_BLOG_DATA_URL', d.data.get('blog_data_url', 'https://blog.tonks.top/data')
+    ).rstrip('/')
     result = {'featuredProject': None, 'featuredTimeline': None}
 
     # 获取最新项目（按 startDate 降序）
@@ -412,7 +527,7 @@ def fetch_blog_extra():
 
 def fetch_github_contributions():
     """通过 GitHub GraphQL API 获取贡献热力图数据"""
-    token = d.dget('github_token')
+    token = configured_value(d, 'SLEEPY_GITHUB_TOKEN', 'github_token', '')
     if not token or token == 'github_pat_xxx':
         return {'error': 'GitHub token not configured'}
 
@@ -650,7 +765,7 @@ def set_normal():
         )
     secret = request.args.get("secret", "")
     u.info(f'status update requested: status={status}, app_name={app_name}')
-    secret_real = d.dget('secret')
+    secret_real = configured_value(d, 'SLEEPY_STATUS_SECRET', 'secret', '')
     if secret == secret_real:
         # 用写锁保护写操作，一次性保存避免多次磁盘写入
         with write_lock:
@@ -1333,7 +1448,7 @@ if __name__ == '__main__':
 
     d.load()
     serve(app,
-        host=d.data['host'],
-        port=d.data['port'],
+        host=os.environ.get('SLEEPY_HOST', d.data.get('host', '0.0.0.0')),
+        port=int(os.environ.get('SLEEPY_PORT', d.data.get('port', 9010))),
         threads=16
     )

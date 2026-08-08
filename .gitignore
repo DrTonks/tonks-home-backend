@@ -3,6 +3,9 @@ data.json
 analytics.sqlite3
 analytics.sqlite3-shm
 analytics.sqlite3-wal
+recommendations.sqlite3
+recommendations.sqlite3-shm
+recommendations.sqlite3-wal
 local.env.bat
 .env
 .env.*

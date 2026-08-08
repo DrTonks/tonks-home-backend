@@ -1,0 +1,47 @@
+{
+  "q_color": {
+    "prompt": "用户刚告诉你喜欢的颜色。对这个偏好作一句符合人设的简短回应。",
+    "search_policy": "never",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_food": {
+    "prompt": "用户刚告诉你平时喜欢的食物。对这个偏好作一句符合人设的简短回应。",
+    "search_policy": "never",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_mood": {
+    "prompt": "用户刚描述了今天的心情。给予简短、自然、不过度医疗化的陪伴式回应。",
+    "search_policy": "never",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_recent_music": {
+    "prompt": "用户刚告诉你最近在听的歌曲。对歌曲或偏好作一句简短回应；只有确实需要核实作品信息时才搜索。",
+    "search_policy": "optional",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_recent_game": {
+    "prompt": "用户刚告诉你最近在玩的游戏。对游戏或体验作一句简短回应；只有确实需要核实作品信息时才搜索。",
+    "search_policy": "optional",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_recent_food": {
+    "prompt": "用户刚告诉你最近吃到的美食。作一句有生活感、符合人设的简短回应。",
+    "search_policy": "never",
+    "context_fields": ["previous_answer", "user_name", "city"]
+  },
+  "q_recent_book": {
+    "prompt": "用户刚告诉你最近在读的书。对作品或阅读偏好作一句简短回应；只有确实需要核实作品信息时才搜索。",
+    "search_policy": "optional",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_recent_anime": {
+    "prompt": "用户刚告诉你最近在看的动画。对作品或观看体验作一句简短回应；只有确实需要核实作品信息时才搜索。",
+    "search_policy": "optional",
+    "context_fields": ["previous_answer", "user_name"]
+  },
+  "q_city_life": {
+    "prompt": "用户刚描述了最近在所在城市的生活。结合已提供的城市和天气作一句简短、自然的回应，不要虚构当地事实。",
+    "search_policy": "never",
+    "context_fields": ["previous_answer", "user_name", "city", "weather"]
+  }
+}

@@ -6,7 +6,7 @@
 不会对 `data.json` 做高频整文件写入。同一匿名访客、同一文章在 30 分钟内只计一次。
 
 - `SLEEPY_ANALYTICS_DB`：可选，覆盖 SQLite 文件路径。
-- `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `admin_secret`。
+- `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `SLEEPY_ADMIN_SECRET`。
 - `SLEEPY_CORS_ORIGINS`：可选，逗号分隔的允许来源；同源反向代理部署无需配置。
 
 完整回归测试：
@@ -52,9 +52,10 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
 
    ```powershell
    Copy-Item example.jsonc data.json
+   Copy-Item .env.example .env
    ```
 
-   编辑 `data.json`，至少替换 `secret`、`admin_secret`，并按需配置监听地址、博客和 GitHub 数据源。`data.json` 已被 Git 忽略，不能提交。
+   `data.json` 只保存状态列表、日历、音乐、待办等运行时数据；在 `.env` 中填写 `SLEEPY_STATUS_SECRET`、`SLEEPY_ADMIN_SECRET`、`SLEEPY_GITHUB_TOKEN` 和 AI 配置。两者都已被 Git 忽略，不能提交。
 
 3. 启动服务。
 
@@ -62,7 +63,7 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
    python server.py
    ```
 
-   默认监听 `http://127.0.0.1:9010`（由 `data.json` 的 `host`、`port` 控制）。生产环境建议由 Nginx/Caddy 反向代理并启用 HTTPS。
+   服务启动时自动读取与 `server.py` 同目录的 `.env`，已存在的进程环境变量优先级更高。监听地址由 `SLEEPY_HOST`、`SLEEPY_PORT` 控制。生产环境建议由 Nginx/Caddy 反向代理并启用 HTTPS。
 
 完整接口见 [API文档.md](API文档.md)。
 
@@ -91,8 +92,8 @@ Copy-Item local.env.bat.example local.env.bat
 
 - `SLEEPY_PYTHON`：本机 Python 的绝对路径。
 - `SLEEPY_SERVER_URL`：部署后的服务根 URL，不要以 `/` 结尾。
-- `SLEEPY_STATUS_SECRET`：对应 `data.json` 的 `secret`。
-- `SLEEPY_ADMIN_SECRET`：对应 `data.json` 的 `admin_secret`。
+- `SLEEPY_STATUS_SECRET`：与服务器 `.env` 中的同名配置保持一致。
+- `SLEEPY_ADMIN_SECRET`：与服务器 `.env` 中的同名配置保持一致。
 
 `local.env.bat` 已被 Git 忽略。不要把真实地址、密钥或令牌写回脚本、示例文件或文档。
 
@@ -108,7 +109,8 @@ python upload_agent_stats.py --server https://status.example.com --secret YOUR_A
 
 以下内容默认不会进入 Git：
 
-- `data.json`：运行时状态、密钥、GitHub token、个人日历/待办等。
+- `data.json`：运行时状态、个人日历、音乐和待办等动态数据。
+- `.env`：服务端密钥、GitHub token、AI 密钥与静态运行配置。
 - `local.env.bat` 与 `.env*`：本地地址和密钥。
 - `部署指南.md`、本地诊断日志与上传的 `music/` 文件。
 
@@ -126,6 +128,6 @@ git diff --cached --check
 ## 安全建议
 
 - 不要通过 URL 查询参数长期传递高价值密钥；本项目沿用这一兼容接口，公网部署时应使用 HTTPS，并考虑改为请求头鉴权。
-- 请为 `secret` 与 `admin_secret` 使用不同的随机值。
+- 请为 `SLEEPY_STATUS_SECRET` 与 `SLEEPY_ADMIN_SECRET` 使用不同的随机值，并在 Linux 上执行 `chmod 600 .env`。
 - GitHub token 最小化授权，避免写入权限；不需要 GitHub 卡片时留空即可。
 - 服务对外开放前，请在反向代理、防火墙和访问日志层面做好限制。

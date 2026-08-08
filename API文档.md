@@ -8,14 +8,16 @@
 | 数据格式 | JSON (Content-Type: application/json) |
 | 字符编码 | UTF-8 |
 
+服务启动时自动读取与 `server.py` 同目录的 `.env`，进程环境变量优先于文件值。敏感配置包括 `SLEEPY_STATUS_SECRET`、`SLEEPY_ADMIN_SECRET`、`SLEEPY_GITHUB_TOKEN`、`SLEEPY_AI_API_KEY`；`data.json` 只保留运行时业务数据。若旧 `data.json` 仍有对应密钥，只有在 `.env` 已提供非空替代值时才会自动移除旧副本。
+
 ## 认证体系
 
 系统使用两级密钥认证，均通过 URL query parameter 传入：
 
 | 密钥类型 | 参数 | 默认值 | 适用接口 |
 |----------|------|--------|----------|
-| PC 状态密钥 | `?secret=xxx` | `<STATUS_SECRET>` (data.json 中 `secret` 字段) | `GET /set` |
-| 管理员密钥 | `?secret=xxx` | `<ADMIN_SECRET>` (data.json 中 `admin_secret` 字段) | 所有 POST 管理接口 |
+| PC 状态密钥 | `?secret=xxx` | `<STATUS_SECRET>`（`.env` 中 `SLEEPY_STATUS_SECRET`） | `GET /set` |
+| 管理员密钥 | `?secret=xxx` | `<ADMIN_SECRET>`（`.env` 中 `SLEEPY_ADMIN_SECRET`） | 所有管理接口 |
 
 **认证失败统一响应** (HTTP 200 + JSON):
 ```json
@@ -50,6 +52,10 @@
 | GET | `/calendar/holidays` | 无 | 公共节假日 |
 | GET | `/github/stats` | 无 | GitHub 统计 |
 | GET | `/images/<filename>` | 无 | 博客项目/时光机图片 |
+| POST | `/pet/reply` | 无（服务端限流） | 桌宠单轮 AI 回复，支持 JSON/SSE |
+| POST | `/pet/recommendations` | 无（服务端限流） | 向网站作者提交歌/书/游戏/番剧推荐 |
+| GET | `/pet/recommendations` | 无 | 查询推荐，可按日期和分类筛选 |
+| DELETE | `/pet/recommendations/<id>` | 管理员 | 删除一条推荐 |
 
 ---
 
@@ -814,11 +820,189 @@ async getGitHubStats() {
 
 ---
 
+## 桌宠 AI 与推荐接口
+
+### POST `/pet/reply` — 桌宠单轮 AI 回复
+
+无登录、无服务端会话历史。后端只接受预先启用的 `question_id`，不接受前端传入系统提示词、模型名、搜索 URL 或任意工具定义。
+
+**请求头**:
+
+| Header | 必填 | 说明 |
+|--------|------|------|
+| `Content-Type: application/json` | 是 | JSON 请求体 |
+| `Accept: text/event-stream` | 否 | 提供时返回 SSE，否则返回普通 JSON |
+| `X-Client-ID` | 建议 | 浏览器生成的匿名随机 ID，只用于限流 |
+
+**请求体**:
+
+```json
+{
+  "pet_id": "static",
+  "question_id": "q_recent_music",
+  "answer": "《晴天》",
+  "context": {
+    "previous_answer": "《夜曲》",
+    "user_name": "Tonks",
+    "city": "福州",
+    "weather": { "desc": "多云", "temp": 28 }
+  }
+}
+```
+
+| 字段 | 约束 |
+|------|------|
+| `pet_id` | `static` 或 `live2d` |
+| `question_id` | `pet_ai/questions.json` 中启用的 ID |
+| `answer` | 必填字符串，最多 100 字符 |
+| `context.previous_answer` | 可选，最多 100 字符；仅允许该字段的问题会保留 |
+| `context.user_name` / `context.city` | 可选，各最多 30 字符 |
+| `context.weather.temp` | 可选，-80 到 80 |
+| 整个请求体 | 最多 4096 字节 |
+
+**普通 JSON 成功响应**:
+
+```json
+{
+  "success": true,
+  "reply": "从《夜曲》换到《晴天》，像是把夜色慢慢听亮了。"
+}
+```
+
+**SSE 响应事件**:
+
+```text
+data: {"type":"status","stage":"thinking"}
+
+data: {"type":"status","stage":"searching"}
+
+data: {"type":"status","stage":"thinking"}
+
+data: {"type":"result","reply":"……"}
+```
+
+`searching` 只会在歌曲、书、游戏、番剧问题确实触发搜索时出现。事件不会包含搜索词、URL、工具参数、网页原文或模型思考过程。
+
+普通 JSON 失败示例：
+
+```json
+{ "success": false, "code": "rate_limited" }
+```
+
+SSE 已开始后发生错误：
+
+```text
+data: {"type":"error","code":"provider_unavailable"}
+```
+
+常见错误码：`invalid_json`、`body_too_large`、`unknown_pet`、`unknown_question`、`field_too_long`、`rate_limited`、`not_configured`、`provider_rate_limited`、`provider_unavailable`、`reply_failed`。
+
+---
+
+### POST `/pet/recommendations` — 提交推荐
+
+公开接口，用于把用户本次填写的歌曲、书、游戏或番剧推荐给网站作者。该接口只保存推荐内容，不调用大模型。
+
+```json
+{
+  "category": "music",
+  "content": "《晴天》 - 周杰伦",
+  "user_name": "Tonks"
+}
+```
+
+| 字段 | 必填 | 约束 |
+|------|------|------|
+| `category` | 是 | `music`、`book`、`game`、`anime` 四选一 |
+| `content` | 是 | 1–100 字符 |
+| `user_name` | 否 | 最多 30 字符；缺失或空值统一存为 `unknown` |
+| 整个请求体 | 是 | 最多 1024 字节 |
+
+建议同时发送 `X-Client-ID` 请求头。成功响应：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "recommendation": {
+    "id": 17,
+    "category": "music",
+    "content": "《晴天》 - 周杰伦",
+    "user_name": "Tonks",
+    "created_at": "2026-08-08T12:30:00+00:00"
+  }
+}
+```
+
+默认限制为同一 IP、同一 `X-Client-ID` 各每分钟 6 次、每天 30 次。`user_name` 只是用户填写的显示名，不是可信身份。前端展示 `content` 与 `user_name` 时必须使用文本节点，不得作为 HTML 插入。
+
+---
+
+### GET `/pet/recommendations` — 查询推荐
+
+公开接口。没有筛选参数时返回全部推荐，按 ID 倒序排列。
+
+| Query 参数 | 必填 | 说明 |
+|------------|------|------|
+| `category` | 否 | `music`、`book`、`game`、`anime` |
+| `date` | 否 | `YYYY-MM-DD`，按记录创建时的服务器本地自然日筛选 |
+
+两个参数可组合：
+
+```http
+GET /pet/recommendations?category=book&date=2026-08-08
+```
+
+```json
+{
+  "success": true,
+  "recommendations": [
+    {
+      "id": 18,
+      "category": "book",
+      "content": "《献给阿尔吉侬的花束》",
+      "user_name": "unknown",
+      "created_at": "2026-08-08T12:40:00+00:00"
+    }
+  ],
+  "count": 1,
+  "filters": { "category": "book", "date": "2026-08-08" }
+}
+```
+
+无结果时 `recommendations` 为 `[]`、`count` 为 `0`。日期无效返回 `invalid_date`，分类无效返回 `unknown_category`。
+
+---
+
 ## 管理接口 (需要 `?secret=<ADMIN_SECRET>`)
 
 所有管理接口统一在 URL 上附加 `?secret=<ADMIN_SECRET>` 进行认证。认证失败返回：
 ```json
 { "success": false, "code": "not authorized", "message": "invalid admin secret" }
+```
+
+---
+
+### DELETE `/pet/recommendations/<id>` — 删除推荐
+
+```http
+DELETE /pet/recommendations/17?secret=<ADMIN_SECRET>
+```
+
+成功响应：
+
+```json
+{ "success": true, "code": "OK", "deleted": 17 }
+```
+
+记录不存在时返回：
+
+```json
+{
+  "success": false,
+  "code": "not found",
+  "message": "recommendation not found"
+}
 ```
 
 ---
@@ -1255,7 +1439,7 @@ axios.interceptors.response.use(
 
 ## 注意事项
 
-1. **无 CORS 配置**: 如果前端和后端不同域，需要在 Flask 中添加 CORS 支持或通过 Apache2 反向代理
+1. **CORS 白名单**: 前后端不同域时，在 `.env` 的 `SLEEPY_CORS_ORIGINS` 中填写逗号分隔的可信来源；同源反向代理无需配置
 2. **音乐上传大小限制**: Flask 默认无限制，生产环境建议配置 `MAX_CONTENT_LENGTH`
 3. **data.json 并发安全**: 写操作使用线程锁 + 原子写入，多进程部署需注意
 4. **时间戳**: `/query` 返回的 timestamp 是 Unix 秒级时间戳

@@ -64,8 +64,13 @@ def setUpModule():
     os.environ["SLEEPY_MUSIC_DIR"] = str(root / "music")
     os.environ["SLEEPY_ANALYTICS_DB"] = str(root / "analytics.sqlite3")
     os.environ["SLEEPY_AGENT_ACTIVITY_DB"] = str(root / "agent_activity.sqlite3")
+    os.environ["SLEEPY_RECOMMENDATIONS_DB"] = str(root / "recommendations.sqlite3")
     os.environ["SLEEPY_ANALYTICS_SALT"] = "analytics-test-salt"
     os.environ["SLEEPY_CORS_ORIGINS"] = "http://127.0.0.1:4321"
+    os.environ["SLEEPY_ENV_FILE"] = str(root / "missing-test.env")
+    os.environ["SLEEPY_STATUS_SECRET"] = TEST_CONFIG["secret"]
+    os.environ["SLEEPY_ADMIN_SECRET"] = TEST_CONFIG["admin_secret"]
+    os.environ["SLEEPY_GITHUB_TOKEN"] = TEST_CONFIG["github_token"]
     os.chdir(root)
     sys.path.insert(0, str(REPO_DIR))
     import server as imported_backend
@@ -80,8 +85,13 @@ def tearDownModule():
         "SLEEPY_MUSIC_DIR",
         "SLEEPY_ANALYTICS_DB",
         "SLEEPY_AGENT_ACTIVITY_DB",
+        "SLEEPY_RECOMMENDATIONS_DB",
         "SLEEPY_ANALYTICS_SALT",
         "SLEEPY_CORS_ORIGINS",
+        "SLEEPY_ENV_FILE",
+        "SLEEPY_STATUS_SECRET",
+        "SLEEPY_ADMIN_SECRET",
+        "SLEEPY_GITHUB_TOKEN",
     ):
         os.environ.pop(name, None)
     if str(REPO_DIR) in sys.path:
@@ -108,6 +118,9 @@ class AllApiRoutesTest(unittest.TestCase):
             path = root / f"agent_activity.sqlite3{suffix}"
             if path.exists():
                 path.unlink()
+            path = root / f"recommendations.sqlite3{suffix}"
+            if path.exists():
+                path.unlink()
         for path in (root / "music").iterdir():
             path.unlink()
         backend.d.load()
@@ -117,6 +130,10 @@ class AllApiRoutesTest(unittest.TestCase):
         backend.agent_store = backend.AgentActivityStore(
             str(root / "agent_activity.sqlite3")
         )
+        backend.recommendation_store = backend.RecommendationStore(
+            str(root / "recommendations.sqlite3")
+        )
+        backend.recommendation_limiter = backend.RecommendationRateLimiter(100, 100)
         backend.online_users.clear()
         self.client = backend.app.test_client()
 
@@ -150,6 +167,10 @@ class AllApiRoutesTest(unittest.TestCase):
             ("GET", "/github/stats"),
             ("GET", "/todos"),
             ("POST", "/todos"),
+            ("POST", "/pet/reply"),
+            ("GET", "/pet/recommendations"),
+            ("POST", "/pet/recommendations"),
+            ("DELETE", "/pet/recommendations/<int:recommendation_id>"),
         }
         actual = {
             (method, rule.rule)
@@ -207,6 +228,76 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )
         self.assertFalse(denied["success"])
+
+    def test_pet_recommendations_full_lifecycle(self):
+        anonymous = self.json(
+            self.client.post(
+                "/pet/recommendations",
+                json={"category": "book", "content": "献给阿尔吉侬的花束"},
+                headers={"X-Client-ID": "reader-1"},
+            )
+        )["recommendation"]
+        self.assertEqual(anonymous["user_name"], "unknown")
+
+        named = self.json(
+            self.client.post(
+                "/pet/recommendations",
+                json={
+                    "category": "music",
+                    "content": "晴天",
+                    "user_name": "Tonks",
+                },
+                headers={"X-Client-ID": "reader-2"},
+            )
+        )["recommendation"]
+        self.assertEqual(named["user_name"], "Tonks")
+
+        all_items = self.json(self.client.get("/pet/recommendations"))
+        self.assertEqual(all_items["count"], 2)
+        self.assertEqual(all_items["recommendations"][0]["id"], named["id"])
+
+        music = self.json(
+            self.client.get(
+                "/pet/recommendations",
+                query_string={"category": "music"},
+            )
+        )
+        self.assertEqual(music["recommendations"], [named])
+
+        today = time.strftime("%Y-%m-%d")
+        dated = self.json(
+            self.client.get(
+                "/pet/recommendations",
+                query_string={"date": today, "category": "book"},
+            )
+        )
+        self.assertEqual(dated["recommendations"], [anonymous])
+
+        invalid = self.json(
+            self.client.post(
+                "/pet/recommendations",
+                json={"category": "food", "content": "nope"},
+            )
+        )
+        self.assertFalse(invalid["success"])
+        self.assertEqual(invalid["code"], "unknown_category")
+
+        denied = self.json(
+            self.client.delete(
+                f"/pet/recommendations/{anonymous['id']}",
+                query_string={"secret": "wrong"},
+            )
+        )
+        self.assertFalse(denied["success"])
+
+        deleted = self.json(
+            self.client.delete(
+                f"/pet/recommendations/{anonymous['id']}",
+                query_string={"secret": TEST_CONFIG["admin_secret"]},
+            )
+        )
+        self.assertEqual(deleted["deleted"], anonymous["id"])
+        self.assertEqual(self.json(self.client.get("/pet/recommendations"))["count"], 1)
 
     def test_agent_activity_get_and_post(self):
         payload = {
