@@ -228,7 +228,7 @@ def pet_recommendations():
             return reterr(code='body too large', message='request body exceeds 1024 bytes')
         try:
             payload = request.get_json(force=False, silent=False)
-            category, content, user_name = validate_recommendation_payload(payload)
+            category, content, user_name, city = validate_recommendation_payload(payload)
             recommendation_limiter.check(*get_recommendation_rate_limit_keys(request))
         except RecommendationValidationError as exc:
             return reterr(code=exc.code, message=exc.message)
@@ -238,7 +238,7 @@ def pet_recommendations():
             return reterr(code='invalid JSON', message='expected a JSON object')
 
         try:
-            recommendation = recommendation_store.create(category, content, user_name)
+            recommendation = recommendation_store.create(category, content, user_name, city)
         except Exception:
             return reterr(code='server error', message='failed to save recommendation')
         return u.format_dict({
@@ -247,6 +247,9 @@ def pet_recommendations():
             'recommendation': recommendation,
         })
 
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err
     try:
         category, created_date = validate_recommendation_filters(
             request.args.get('category'),

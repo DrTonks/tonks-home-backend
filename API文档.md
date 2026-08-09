@@ -54,7 +54,7 @@
 | GET | `/images/<filename>` | 无 | 博客项目/时光机图片 |
 | POST | `/pet/reply` | 无（服务端限流） | 桌宠单轮 AI 回复，支持 JSON/SSE |
 | POST | `/pet/recommendations` | 无（服务端限流） | 向网站作者提交歌/书/游戏/番剧推荐 |
-| GET | `/pet/recommendations` | 无 | 查询推荐，可按日期和分类筛选 |
+| GET | `/pet/recommendations` | 管理员 | 查询推荐，可按日期和分类筛选 |
 | DELETE | `/pet/recommendations/<id>` | 管理员 | 删除一条推荐 |
 
 ---
@@ -913,7 +913,8 @@ data: {"type":"error","code":"provider_unavailable"}
 {
   "category": "music",
   "content": "《晴天》 - 周杰伦",
-  "user_name": "Tonks"
+  "user_name": "Tonks",
+  "city": "福州"
 }
 ```
 
@@ -922,6 +923,7 @@ data: {"type":"error","code":"provider_unavailable"}
 | `category` | 是 | `music`、`book`、`game`、`anime` 四选一 |
 | `content` | 是 | 1–100 字符 |
 | `user_name` | 否 | 最多 30 字符；缺失或空值统一存为 `unknown` |
+| `city` | 否 | 最多 50 字符；来自浏览器已有的粗粒度城市缓存，缺失或空值统一存为 `unknown` |
 | 整个请求体 | 是 | 最多 1024 字节 |
 
 建议同时发送 `X-Client-ID` 请求头。成功响应：
@@ -935,18 +937,19 @@ data: {"type":"error","code":"provider_unavailable"}
     "category": "music",
     "content": "《晴天》 - 周杰伦",
     "user_name": "Tonks",
+    "city": "福州",
     "created_at": "2026-08-08T12:30:00+00:00"
   }
 }
 ```
 
-默认限制为同一 IP、同一 `X-Client-ID` 各每分钟 6 次、每天 30 次。`user_name` 只是用户填写的显示名，不是可信身份。前端展示 `content` 与 `user_name` 时必须使用文本节点，不得作为 HTML 插入。
+默认限制为同一 IP、同一 `X-Client-ID` 各每分钟 6 次、每天 30 次。`user_name` 只是用户填写的显示名，不是可信身份，`city` 也是客户端提交的显示信息而非可信定位。前端展示 `content`、`user_name` 与 `city` 时必须使用文本节点，不得作为 HTML 插入。推荐接口不接收或保存 IP、经纬度、region、country。
 
 ---
 
-### GET `/pet/recommendations` — 查询推荐
+### GET `/pet/recommendations` — 管理员查询推荐
 
-公开接口。没有筛选参数时返回全部推荐，按 ID 倒序排列。
+管理员接口，需要 `?secret=<ADMIN_SECRET>`。没有筛选参数时返回全部推荐，按 ID 倒序排列；未认证请求不会返回昵称、城市或推荐内容。
 
 | Query 参数 | 必填 | 说明 |
 |------------|------|------|
@@ -956,7 +959,7 @@ data: {"type":"error","code":"provider_unavailable"}
 两个参数可组合：
 
 ```http
-GET /pet/recommendations?category=book&date=2026-08-08
+GET /pet/recommendations?category=book&date=2026-08-08&secret=<ADMIN_SECRET>
 ```
 
 ```json
@@ -968,6 +971,7 @@ GET /pet/recommendations?category=book&date=2026-08-08
       "category": "book",
       "content": "《献给阿尔吉侬的花束》",
       "user_name": "unknown",
+      "city": "unknown",
       "created_at": "2026-08-08T12:40:00+00:00"
     }
   ],

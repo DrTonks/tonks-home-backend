@@ -22,7 +22,20 @@ class RecommendationValidationTests(unittest.TestCase):
             validate_recommendation_payload(
                 {"category": "MUSIC", "content": "  晴天\n 周杰伦  "}
             ),
-            ("music", "晴天 周杰伦", "unknown"),
+            ("music", "晴天 周杰伦", "unknown", "unknown"),
+        )
+
+    def test_normalizes_optional_city(self):
+        self.assertEqual(
+            validate_recommendation_payload(
+                {
+                    "category": "anime",
+                    "content": "缎带英雄",
+                    "user_name": "Tonks",
+                    "city": "  福州\n市区 ",
+                }
+            ),
+            ("anime", "缎带英雄", "Tonks", "福州 市区"),
         )
 
     def test_rejects_unknown_categories_long_values_and_bad_dates(self):
@@ -30,6 +43,10 @@ class RecommendationValidationTests(unittest.TestCase):
             validate_recommendation_payload({"category": "food", "content": "面"})
         with self.assertRaises(RecommendationValidationError):
             validate_recommendation_payload({"category": "book", "content": "x" * 101})
+        with self.assertRaises(RecommendationValidationError):
+            validate_recommendation_payload(
+                {"category": "book", "content": "书", "city": "x" * 51}
+            )
         with self.assertRaises(RecommendationValidationError):
             validate_recommendation_filters(created_date="2026-02-30")
 
@@ -52,11 +69,13 @@ class RecommendationStoreTests(unittest.TestCase):
             "book",
             "献给阿尔吉侬的花束",
             "Tonks",
+            "福州",
             now=datetime(2026, 8, 8, 23, 30, tzinfo=china),
         )
         second = self.store.create(
             "anime",
             "葬送的芙莉莲",
+            "unknown",
             "unknown",
             now=datetime(2026, 8, 9, 0, 30, tzinfo=china),
         )
@@ -65,6 +84,30 @@ class RecommendationStoreTests(unittest.TestCase):
         self.assertEqual(self.store.list(created_date="2026-08-09"), [second])
         self.assertTrue(self.store.delete(first["id"]))
         self.assertFalse(self.store.delete(first["id"]))
+
+    def test_initialize_migrates_an_existing_table_without_city(self):
+        import sqlite3
+
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE pet_recommendations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    user_name TEXT NOT NULL DEFAULT 'unknown',
+                    created_at TEXT NOT NULL,
+                    created_date TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.store.initialize()
+        created = self.store.create("music", "晴天", "Tonks")
+        self.assertEqual(created["city"], "unknown")
 
 
 class RecommendationRateLimiterTests(unittest.TestCase):

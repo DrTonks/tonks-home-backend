@@ -58,7 +58,7 @@ def _text(value: Any, field: str, maximum: int, *, required: bool = False) -> st
     return value
 
 
-def validate_recommendation_payload(payload: Any) -> tuple[str, str, str]:
+def validate_recommendation_payload(payload: Any) -> tuple[str, str, str, str]:
     if not isinstance(payload, dict):
         raise RecommendationValidationError("invalid_body", "expected a JSON object")
     category = _text(payload.get("category"), "category", 16, required=True).lower()
@@ -66,7 +66,8 @@ def validate_recommendation_payload(payload: Any) -> tuple[str, str, str]:
         raise RecommendationValidationError("unknown_category", "category is not enabled")
     content = _text(payload.get("content"), "content", 100, required=True)
     user_name = _text(payload.get("user_name"), "user_name", 30) or "unknown"
-    return category, content, user_name
+    city = _text(payload.get("city"), "city", 50) or "unknown"
+    return category, content, user_name, city
 
 
 def validate_recommendation_filters(
@@ -118,6 +119,7 @@ class RecommendationStore:
                         CHECK (category IN ('music', 'book', 'game', 'anime')),
                     content TEXT NOT NULL,
                     user_name TEXT NOT NULL DEFAULT 'unknown',
+                    city TEXT NOT NULL DEFAULT 'unknown',
                     created_at TEXT NOT NULL,
                     created_date TEXT NOT NULL
                 );
@@ -129,6 +131,15 @@ class RecommendationStore:
                     ON pet_recommendations(category);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(pet_recommendations)")
+            }
+            if "city" not in columns:
+                connection.execute(
+                    "ALTER TABLE pet_recommendations "
+                    "ADD COLUMN city TEXT NOT NULL DEFAULT 'unknown'"
+                )
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -137,6 +148,7 @@ class RecommendationStore:
             "category": str(row["category"]),
             "content": str(row["content"]),
             "user_name": str(row["user_name"]),
+            "city": str(row["city"]),
             "created_at": str(row["created_at"]),
         }
 
@@ -145,6 +157,7 @@ class RecommendationStore:
         category: str,
         content: str,
         user_name: str,
+        city: str = "unknown",
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
@@ -158,14 +171,14 @@ class RecommendationStore:
             cursor = connection.execute(
                 """
                 INSERT INTO pet_recommendations
-                    (category, content, user_name, created_at, created_date)
-                VALUES (?, ?, ?, ?, ?)
+                    (category, content, user_name, city, created_at, created_date)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (category, content, user_name, created_at, created_date),
+                (category, content, user_name, city, created_at, created_date),
             )
             row = connection.execute(
                 """
-                SELECT id, category, content, user_name, created_at
+                SELECT id, category, content, user_name, city, created_at
                 FROM pet_recommendations WHERE id = ?
                 """,
                 (cursor.lastrowid,),
@@ -191,7 +204,7 @@ class RecommendationStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, category, content, user_name, created_at
+                SELECT id, category, content, user_name, city, created_at
                 FROM pet_recommendations
                 """
                 + where

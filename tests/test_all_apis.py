@@ -238,6 +238,7 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )["recommendation"]
         self.assertEqual(anonymous["user_name"], "unknown")
+        self.assertEqual(anonymous["city"], "unknown")
 
         named = self.json(
             self.client.post(
@@ -246,20 +247,33 @@ class AllApiRoutesTest(unittest.TestCase):
                     "category": "music",
                     "content": "晴天",
                     "user_name": "Tonks",
+                    "city": "福州",
                 },
                 headers={"X-Client-ID": "reader-2"},
             )
         )["recommendation"]
         self.assertEqual(named["user_name"], "Tonks")
+        self.assertEqual(named["city"], "福州")
 
-        all_items = self.json(self.client.get("/pet/recommendations"))
+        denied_list = self.json(self.client.get("/pet/recommendations"))
+        self.assertFalse(denied_list["success"])
+
+        all_items = self.json(
+            self.client.get(
+                "/pet/recommendations",
+                query_string={"secret": TEST_CONFIG["admin_secret"]},
+            )
+        )
         self.assertEqual(all_items["count"], 2)
         self.assertEqual(all_items["recommendations"][0]["id"], named["id"])
 
         music = self.json(
             self.client.get(
                 "/pet/recommendations",
-                query_string={"category": "music"},
+                query_string={
+                    "category": "music",
+                    "secret": TEST_CONFIG["admin_secret"],
+                },
             )
         )
         self.assertEqual(music["recommendations"], [named])
@@ -268,7 +282,11 @@ class AllApiRoutesTest(unittest.TestCase):
         dated = self.json(
             self.client.get(
                 "/pet/recommendations",
-                query_string={"date": today, "category": "book"},
+                query_string={
+                    "date": today,
+                    "category": "book",
+                    "secret": TEST_CONFIG["admin_secret"],
+                },
             )
         )
         self.assertEqual(dated["recommendations"], [anonymous])
@@ -297,7 +315,15 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )
         self.assertEqual(deleted["deleted"], anonymous["id"])
-        self.assertEqual(self.json(self.client.get("/pet/recommendations"))["count"], 1)
+        self.assertEqual(
+            self.json(
+                self.client.get(
+                    "/pet/recommendations",
+                    query_string={"secret": TEST_CONFIG["admin_secret"]},
+                )
+            )["count"],
+            1,
+        )
 
     def test_agent_activity_get_and_post(self):
         payload = {
