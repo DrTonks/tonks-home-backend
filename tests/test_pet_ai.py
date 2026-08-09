@@ -270,6 +270,42 @@ class ServiceTests(unittest.TestCase):
         tool_message = provider.calls[1]["messages"][-1]["content"]
         self.assertIn("search_unavailable", tool_message)
 
+    def test_uncertain_direct_reply_triggers_one_fallback_search(self):
+        provider = FakeProvider(
+            [
+                {"content": "用户没有告诉我作品名，无从回应，也不便搜索。"},
+                {"content": "查到它是一部刚出版的短篇集，文字气质很安静。"},
+            ]
+        )
+        search = FakeSearch()
+        service = PetAIService(config(), provider=provider, search=search)
+
+        events = list(service.events(self.request("q_recent_book")))
+
+        self.assertEqual(
+            [(event["type"], event.get("stage")) for event in events[:-1]],
+            [("status", "thinking"), ("status", "searching"), ("status", "thinking")],
+        )
+        self.assertEqual(search.queries, ["《晴天》 书籍"])
+        self.assertEqual(len(provider.calls), 2)
+        self.assertIn("search_results", provider.calls[1]["messages"][-1]["content"])
+        self.assertNotIn("没有告诉我作品名", events[-1]["reply"])
+
+    def test_prompt_files_are_reloaded_for_each_request(self):
+        provider = FakeProvider(
+            [{"content": "第一次回复。"}, {"content": "第二次回复。"}]
+        )
+        service = PetAIService(config(), provider=provider, search=FakeSearch())
+        prompt_values = ["安全", "旧人设", "输出", "安全", "新人设", "输出"]
+        with mock.patch("pet_ai.service._read_text", side_effect=prompt_values):
+            list(service.events(self.request("q_mood")))
+            list(service.events(self.request("q_mood")))
+
+        first_system = provider.calls[0]["messages"][0]["content"]
+        second_system = provider.calls[1]["messages"][0]["content"]
+        self.assertIn("旧人设", first_system)
+        self.assertIn("新人设", second_system)
+
     def test_non_search_question_never_receives_tool(self):
         provider = FakeProvider([{"content": "我在这里。今天慢一点也没关系。"}])
         service = PetAIService(config(), provider=provider, search=FakeSearch())

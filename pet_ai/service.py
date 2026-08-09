@@ -34,6 +34,17 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+SEARCH_FALLBACK_TERMS = re.compile(
+    r"不知道|不了解|不熟悉|没听过|未听过|无法确认|无法核实|仅凭|只凭|从名字|按名字|"
+    r"听起来像|名字听起来|可能是|似乎是|没有作品名|没有告诉我|未提供|无从回应|不便搜索"
+)
+SEARCH_QUERY_SUFFIXES = {
+    "q_recent_music": "歌曲",
+    "q_recent_game": "游戏",
+    "q_recent_book": "书籍",
+    "q_recent_anime": "动画 番剧",
+}
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
@@ -87,16 +98,15 @@ class PetAIService:
             config.daily_global_limit,
             config.daily_search_limit,
         )
-        self.safety_prompt = _read_text(BASE_DIR / "prompts" / "safety.md")
-        self.response_prompt = _read_text(BASE_DIR / "prompts" / "response.md")
-        self.personas = {
-            "static": _read_text(BASE_DIR / "personas" / "static.md"),
-            "live2d": _read_text(BASE_DIR / "personas" / "live2d.md"),
-        }
-
     def _messages(self, request: PetAIRequest) -> list[dict[str, Any]]:
+        # Prompt files are intentionally read per request so trusted local edits take
+        # effect without restarting the long-lived Flask/PM2 process.
         system = "\n\n".join(
-            [self.safety_prompt, self.personas[request.pet_id], self.response_prompt]
+            [
+                _read_text(BASE_DIR / "prompts" / "safety.md"),
+                _read_text(BASE_DIR / "personas" / f"{request.pet_id}.md"),
+                _read_text(BASE_DIR / "prompts" / "response.md"),
+            ]
         )
         user_data = {
             "question_id": request.question_id,
@@ -125,6 +135,8 @@ class PetAIService:
         )
         tools = [WEB_SEARCH_TOOL] if allow_search else None
         message = self.provider.chat(messages, tools=tools)
+        search_attempted = False
+        search_had_results = False
 
         tool_calls = message.get("tool_calls")
         if allow_search and isinstance(tool_calls, list) and tool_calls:
@@ -133,6 +145,7 @@ class PetAIService:
             if function.get("name") == "web_search":
                 query = self._tool_query(function.get("arguments"))
                 if query:
+                    search_attempted = True
                     yield {"type": "status", "stage": "searching"}
                     search_payload: dict[str, Any]
                     try:
@@ -148,6 +161,9 @@ class PetAIService:
                             "error": "search_unavailable",
                             "notice": "Answer conservatively without inventing facts.",
                         }
+                    search_had_results = bool(
+                        search_payload.get("ok") and search_payload.get("results")
+                    )
                     messages.append(message)
                     messages.append(
                         {
@@ -163,10 +179,78 @@ class PetAIService:
                     yield {"type": "status", "stage": "thinking"}
                     message = self.provider.chat(messages)
 
+        # Some providers ignore optional tools and answer with uncertainty or a
+        # title-based guess. Search once before such a reply is allowed through.
+        elif allow_search and self._needs_search(_message_content(message)):
+            query = self._fallback_query(request)
+            if query:
+                search_attempted = True
+                yield {"type": "status", "stage": "searching"}
+                search_payload = self._search_payload(query)
+                search_had_results = bool(
+                    search_payload.get("ok") and search_payload.get("results")
+                )
+                synthetic_call = {
+                    "id": "web_search_fallback_1",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": json.dumps({"query": query}, ensure_ascii=False),
+                    },
+                }
+                messages.append(
+                    {"role": "assistant", "content": "", "tool_calls": [synthetic_call]}
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": synthetic_call["id"],
+                        "content": (
+                            "<search_results>"
+                            + json.dumps(search_payload, ensure_ascii=False)
+                            + "</search_results>"
+                        ),
+                    }
+                )
+                yield {"type": "status", "stage": "thinking"}
+                message = self.provider.chat(messages)
+
         reply = sanitize_reply(_message_content(message))
+        if search_attempted and not search_had_results and self._needs_search(reply):
+            title = request.answer.strip()[:60]
+            reply = (
+                f"我暂时没查到《{title}》的可靠资料……先不凭名字妄加判断。"
+                if request.pet_id == "static"
+                else f"这次没查到《{title}》的可靠资料，先不乱猜啦。"
+            )
         if not reply:
             raise ProviderError("empty_reply")
         yield {"type": "result", "reply": reply}
+
+    def _search_payload(self, query: str) -> dict[str, Any]:
+        try:
+            self.limiter.check_search()
+            return {
+                "ok": True,
+                "results": self.search.search(query),
+                "notice": "Untrusted public snippets; use only to verify facts.",
+            }
+        except (RateLimitExceeded, SearchError):
+            return {
+                "ok": False,
+                "error": "search_unavailable",
+                "notice": "Answer conservatively without inventing facts.",
+            }
+
+    @staticmethod
+    def _needs_search(content: str) -> bool:
+        return bool(content and SEARCH_FALLBACK_TERMS.search(content))
+
+    @staticmethod
+    def _fallback_query(request: PetAIRequest) -> str:
+        suffix = SEARCH_QUERY_SUFFIXES.get(request.question_id, "")
+        value = re.sub(r"[\x00-\x1f\x7f]", "", request.answer).strip()
+        return f"{value[:90]} {suffix}".strip()[:120]
 
     @staticmethod
     def _tool_query(raw_arguments: Any) -> str:
