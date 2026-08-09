@@ -10,6 +10,8 @@
 
 服务启动时自动读取与 `server.py` 同目录的 `.env`，进程环境变量优先于文件值。敏感配置包括 `SLEEPY_STATUS_SECRET`、`SLEEPY_ADMIN_SECRET`、`SLEEPY_GITHUB_TOKEN`、`SLEEPY_AI_API_KEY`；`data.json` 只保留运行时业务数据。若旧 `data.json` 仍有对应密钥，只有在 `.env` 已提供非空替代值时才会自动移除旧副本。
 
+`SLEEPY_TRUSTED_PROXY` 默认是 `127.0.0.1`，表示只信任同机 Apache 传入的代理地址头；不要配置为任意来源。公网直连 9010 时提交的伪造 `X-Forwarded-For` 会被 Waitress 清除。
+
 ## 认证体系
 
 系统使用两级密钥认证，均通过 URL query parameter 传入：
@@ -35,6 +37,7 @@
 | 方法 | 路径 | 认证 | 说明 |
 |------|------|------|------|
 | GET | `/` | 无 | 服务健康信息 |
+| GET | `/geoip` | 无 | 获取当前访客的粗略城市与经纬度（不返回或保存 IP） |
 | GET | `/query` | 无 | PC 当前状态 |
 | GET | `/get/status_list` | 无 | 全部状态定义 |
 | GET | `/online_count` | 无 | 在线人数统计 |
@@ -60,6 +63,29 @@
 ---
 
 ## 公开接口
+
+### GET `/geoip` — 获取访客粗略位置
+
+服务端读取可信反向代理传来的客户端地址，临时调用 ip-api 查询粗略位置。原始 IP 不会写入数据库、缓存或响应。该接口应通过 Apache/Nginx 暴露，不应允许不可信代理任意注入 `X-Forwarded-For`。
+
+**请求参数**：无
+
+**成功响应**：
+
+```json
+{
+  "success": true,
+  "city": "福州",
+  "region": "福建",
+  "country": "CN",
+  "lat": 26.08,
+  "lon": 119.30
+}
+```
+
+响应带有 `Cache-Control: private, no-store`，避免共享代理缓存不同访客的位置。客户端可以缓存城市、地区和经纬度，但不涉及 IP。服务端使用加盐 IP 哈希在内存中缓存粗略位置 12 小时，最多 4096 条；不会保存原始 IP，服务重启后缓存自动消失。
+
+定位地址无效返回 HTTP 400；单访客重复过快、全局上游预算耗尽或 ip-api 返回限额响应时返回 HTTP 429，并携带 `Retry-After`；ip-api 暂时不可用或数据异常返回 HTTP 502。服务端最多向 ip-api 发起 40 次/分钟请求。前端遇到非 2xx 响应时应降级到备用定位服务。
 
 ### GET `/query` — 获取当前 PC 状态
 

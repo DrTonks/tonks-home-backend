@@ -18,8 +18,11 @@ import json
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
+import urllib.parse
 import hashlib
+import ipaddress
 import re
+from collections import deque
 from markupsafe import escape
 from analytics import BlogAnalytics, AgentActivityStore
 from pet_ai import create_pet_ai_blueprint
@@ -119,6 +122,18 @@ def get_online_count():
 # 写锁，保护对 data.json 的写入
 write_lock = threading.Lock()
 
+# GeoIP 只在内存中保存加盐 IP 哈希与粗略位置，不保存原始 IP。
+# 40/min 略低于 ip-api 免费端点的 45/min，给部署检查等操作留出余量。
+GEOIP_CACHE_TTL_SECONDS = 12 * 60 * 60
+GEOIP_CACHE_MAX_ENTRIES = 4096
+GEOIP_VISITOR_RETRY_SECONDS = 10
+GEOIP_UPSTREAM_LIMIT_PER_MINUTE = 40
+geoip_lock = threading.Lock()
+geoip_cache = {}
+geoip_last_attempt = {}
+geoip_upstream_attempts = deque()
+geoip_runtime_salt = os.urandom(32).hex()
+
 BLOG_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
 
 # --- 辅助函数 ---
@@ -157,6 +172,144 @@ def get_request_key(req):
     if xff:
         return "ip:" + xff.split(',')[0].strip()
     return f'ip:{req.remote_addr}'
+
+
+class GeoIpClientError(ValueError):
+    pass
+
+
+class GeoIpUpstreamError(RuntimeError):
+    pass
+
+
+class GeoIpRateLimitExceeded(RuntimeError):
+    def __init__(self, message, retry_after=GEOIP_VISITOR_RETRY_SECONDS):
+        super().__init__(message)
+        self.retry_after = max(1, int(retry_after))
+
+
+def normalize_public_ip(client_ip):
+    try:
+        address = ipaddress.ip_address(str(client_ip or '').strip())
+    except ValueError as exc:
+        raise GeoIpClientError('client IP is invalid') from exc
+    if not address.is_global:
+        raise GeoIpClientError('client IP is not public')
+    return str(address)
+
+
+def fetch_ip_api_location(client_ip):
+    """Resolve one validated public client IP without retaining or returning it."""
+    address = normalize_public_ip(client_ip)
+    encoded_ip = urllib.parse.quote(address, safe=':')
+    fields = 'status,message,country,countryCode,regionName,city,lat,lon'
+    url = (
+        f'http://ip-api.com/json/{encoded_ip}'
+        f'?lang=zh-CN&fields={urllib.parse.quote(fields, safe=",")}'
+    )
+    upstream_request = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'tonks-home-geo/1.0'},
+    )
+    try:
+        with urllib.request.urlopen(upstream_request, timeout=6) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise GeoIpRateLimitExceeded(
+                'IP geolocation provider rate limited', retry_after=60
+            ) from exc
+        raise GeoIpUpstreamError('IP geolocation provider HTTP error') from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise GeoIpUpstreamError('IP geolocation provider is unavailable') from exc
+
+    if payload.get('status') != 'success':
+        raise GeoIpUpstreamError('IP geolocation provider rejected the lookup')
+
+    try:
+        lat = float(payload.get('lat'))
+        lon = float(payload.get('lon'))
+    except (TypeError, ValueError) as exc:
+        raise GeoIpUpstreamError('IP geolocation returned invalid coordinates') from exc
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise GeoIpUpstreamError('IP geolocation returned invalid coordinates')
+
+    return {
+        'success': True,
+        'city': str(payload.get('city') or '').strip(),
+        'region': str(payload.get('regionName') or '').strip(),
+        'country': str(payload.get('countryCode') or payload.get('country') or '').strip(),
+        'lat': lat,
+        'lon': lon,
+    }
+
+
+def _geoip_cache_key(client_ip):
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    ) or geoip_runtime_salt
+    return hashlib.sha256(
+        f'{salt}|geoip-cache|{client_ip}'.encode('utf-8')
+    ).hexdigest()
+
+
+def _prune_geoip_state(now):
+    for key, (expires_at, _) in list(geoip_cache.items()):
+        if expires_at <= now:
+            geoip_cache.pop(key, None)
+    for key, attempted_at in list(geoip_last_attempt.items()):
+        if now - attempted_at >= 60:
+            geoip_last_attempt.pop(key, None)
+    while geoip_upstream_attempts and now - geoip_upstream_attempts[0] >= 60:
+        geoip_upstream_attempts.popleft()
+
+
+def resolve_geoip_location(client_ip):
+    """Resolve and cache coarse location using only a salted in-memory IP hash."""
+    normalized_ip = normalize_public_ip(client_ip)
+    cache_key = _geoip_cache_key(normalized_ip)
+    now = time.monotonic()
+
+    with geoip_lock:
+        _prune_geoip_state(now)
+        cached = geoip_cache.get(cache_key)
+        if cached:
+            return dict(cached[1])
+        last_attempt = geoip_last_attempt.get(cache_key)
+        if last_attempt is not None and now - last_attempt < GEOIP_VISITOR_RETRY_SECONDS:
+            retry_after = GEOIP_VISITOR_RETRY_SECONDS - (now - last_attempt)
+            raise GeoIpRateLimitExceeded(
+                'visitor location lookup retried too quickly', retry_after=retry_after
+            )
+        if len(geoip_upstream_attempts) >= GEOIP_UPSTREAM_LIMIT_PER_MINUTE:
+            retry_after = 60 - (now - geoip_upstream_attempts[0])
+            raise GeoIpRateLimitExceeded(
+                'location provider request budget exhausted', retry_after=retry_after
+            )
+        geoip_last_attempt[cache_key] = now
+        geoip_upstream_attempts.append(now)
+
+    result = fetch_ip_api_location(normalized_ip)
+
+    with geoip_lock:
+        if len(geoip_cache) >= GEOIP_CACHE_MAX_ENTRIES:
+            oldest_key = min(geoip_cache, key=lambda key: geoip_cache[key][0])
+            geoip_cache.pop(oldest_key, None)
+        geoip_cache[cache_key] = (now + GEOIP_CACHE_TTL_SECONDS, dict(result))
+    return result
+
+
+def get_geoip_client_address(req):
+    """Trust ProxyFix's forwarded address only when the direct peer is local Apache."""
+    original = req.environ.get('werkzeug.proxy_fix.orig') or {}
+    peer_value = original.get('REMOTE_ADDR') or req.remote_addr
+    try:
+        peer = ipaddress.ip_address(str(peer_value or '').strip())
+    except ValueError as exc:
+        raise GeoIpClientError('direct peer IP is invalid') from exc
+    if peer.is_loopback:
+        return req.remote_addr
+    return str(peer)
 
 
 def normalize_blog_slug(value):
@@ -693,6 +846,51 @@ def track_online():
 @app.route('/')
 def index():
     return u.format_dict({'success': True, 'service': 'personal-status-server'})
+
+
+@app.route('/geoip')
+def geoip():
+    """Return coarse location for the current visitor without exposing/storing their IP."""
+    try:
+        result = resolve_geoip_location(get_geoip_client_address(request))
+        response = app.response_class(
+            response=json.dumps(result, ensure_ascii=False),
+            status=200,
+            mimetype='application/json',
+        )
+    except GeoIpClientError:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'geoip unavailable',
+                'message': 'visitor location is unavailable',
+            }, ensure_ascii=False),
+            status=400,
+            mimetype='application/json',
+        )
+    except GeoIpRateLimitExceeded as exc:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'geoip rate limited',
+                'message': 'location lookup is temporarily rate limited',
+            }, ensure_ascii=False),
+            status=429,
+            mimetype='application/json',
+        )
+        response.headers['Retry-After'] = str(exc.retry_after)
+    except GeoIpUpstreamError:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'geoip upstream error',
+                'message': 'location provider is temporarily unavailable',
+            }, ensure_ascii=False),
+            status=502,
+            mimetype='application/json',
+        )
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
 
 
 @app.route('/query')
@@ -1450,8 +1648,12 @@ if __name__ == '__main__':
     from waitress import serve
 
     d.load()
+    trusted_proxy = os.environ.get('SLEEPY_TRUSTED_PROXY', '127.0.0.1').strip()
     serve(app,
         host=os.environ.get('SLEEPY_HOST', d.data.get('host', '0.0.0.0')),
         port=int(os.environ.get('SLEEPY_PORT', d.data.get('port', 9010))),
-        threads=16
+        threads=16,
+        trusted_proxy=trusted_proxy or None,
+        trusted_proxy_headers={'x-forwarded-for', 'x-forwarded-proto'} if trusted_proxy else set(),
+        clear_untrusted_proxy_headers=True,
     )

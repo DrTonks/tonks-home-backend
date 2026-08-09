@@ -135,6 +135,9 @@ class AllApiRoutesTest(unittest.TestCase):
         )
         backend.recommendation_limiter = backend.RecommendationRateLimiter(100, 100)
         backend.online_users.clear()
+        backend.geoip_cache.clear()
+        backend.geoip_last_attempt.clear()
+        backend.geoip_upstream_attempts.clear()
         self.client = backend.app.test_client()
 
     def json(self, response):
@@ -145,6 +148,7 @@ class AllApiRoutesTest(unittest.TestCase):
     def test_route_inventory_matches_tested_contract(self):
         expected = {
             ("GET", "/"),
+            ("GET", "/geoip"),
             ("GET", "/query"),
             ("GET", "/get/status_list"),
             ("GET", "/online_count"),
@@ -192,6 +196,41 @@ class AllApiRoutesTest(unittest.TestCase):
             "http://127.0.0.1:4321",
         )
 
+        with mock.patch.object(
+            backend,
+            "fetch_ip_api_location",
+            return_value={
+                "success": True,
+                "city": "福州",
+                "region": "福建",
+                "country": "CN",
+                "lat": 26.08,
+                "lon": 119.30,
+            },
+        ) as lookup:
+            geoip = self.client.get(
+                "/geoip",
+                headers={"X-Forwarded-For": "110.80.172.21"},
+            )
+        self.assertEqual(geoip.status_code, 200)
+        self.assertEqual(geoip.headers.get("Cache-Control"), "private, no-store")
+        self.assertEqual(geoip.get_json()["city"], "福州")
+        self.assertNotIn("ip", geoip.get_json())
+        lookup.assert_called_once_with("110.80.172.21")
+
+        # 同一访客重复请求命中加盐哈希内存缓存，不再次消耗 ip-api 额度。
+        cached_geoip = self.client.get(
+            "/geoip",
+            headers={"X-Forwarded-For": "110.80.172.21"},
+        )
+        self.assertEqual(cached_geoip.status_code, 200)
+        self.assertEqual(cached_geoip.get_json()["city"], "福州")
+        lookup.assert_called_once()
+        self.assertNotIn(
+            "110.80.172.21",
+            json.dumps(list(backend.geoip_cache.keys())),
+        )
+
         statuses = self.json(self.client.get("/get/status_list"))
         self.assertEqual(statuses[0]["name"], "Online")
 
@@ -228,6 +267,70 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )
         self.assertFalse(denied["success"])
+
+    def test_geoip_distinguishes_client_rate_limit_and_upstream_failures(self):
+        invalid = self.client.get("/geoip")
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.get_json()["code"], "geoip unavailable")
+
+        backend.geoip_last_attempt.clear()
+        backend.geoip_upstream_attempts.clear()
+        with mock.patch.object(
+            backend,
+            "fetch_ip_api_location",
+            side_effect=backend.GeoIpUpstreamError("provider failed"),
+        ):
+            upstream = self.client.get(
+                "/geoip",
+                headers={"X-Forwarded-For": "110.80.172.21"},
+            )
+        self.assertEqual(upstream.status_code, 502)
+        self.assertEqual(upstream.get_json()["code"], "geoip upstream error")
+
+        backend.geoip_last_attempt.clear()
+        backend.geoip_upstream_attempts.clear()
+        backend.geoip_upstream_attempts.extend(
+            [time.monotonic()] * backend.GEOIP_UPSTREAM_LIMIT_PER_MINUTE
+        )
+        with mock.patch.object(backend, "fetch_ip_api_location") as lookup:
+            limited = self.client.get(
+                "/geoip",
+                headers={"X-Forwarded-For": "110.80.172.21"},
+            )
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.get_json()["code"], "geoip rate limited")
+        self.assertGreaterEqual(int(limited.headers.get("Retry-After")), 1)
+        self.assertLessEqual(int(limited.headers.get("Retry-After")), 60)
+        lookup.assert_not_called()
+
+    def test_geoip_treats_provider_payload_failures_as_upstream_errors(self):
+        failed_response = mock.MagicMock()
+        failed_response.__enter__.return_value.read.return_value = b'{"status":"fail"}'
+        with mock.patch.object(
+            backend.urllib.request,
+            "urlopen",
+            return_value=failed_response,
+        ):
+            with self.assertRaises(backend.GeoIpUpstreamError):
+                backend.fetch_ip_api_location("110.80.172.21")
+
+        malformed_request = mock.MagicMock()
+        malformed_request.environ = {}
+        malformed_request.remote_addr = "not-an-ip"
+        with self.assertRaises(backend.GeoIpClientError):
+            backend.get_geoip_client_address(malformed_request)
+
+        malformed_response = mock.MagicMock()
+        malformed_response.__enter__.return_value.read.return_value = (
+            b'{"status":"success","lat":null,"lon":119.3}'
+        )
+        with mock.patch.object(
+            backend.urllib.request,
+            "urlopen",
+            return_value=malformed_response,
+        ):
+            with self.assertRaises(backend.GeoIpUpstreamError):
+                backend.fetch_ip_api_location("110.80.172.21")
 
     def test_pet_recommendations_full_lifecycle(self):
         anonymous = self.json(
