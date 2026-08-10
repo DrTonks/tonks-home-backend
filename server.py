@@ -77,6 +77,8 @@ def add_configured_cors_headers(response):
 # === 音乐文件存储目录 ===
 MUSIC_DIR = os.environ.get('SLEEPY_MUSIC_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'music'))
 ALLOWED_MUSIC_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
+ALLOWED_COVER_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
+MAX_COVER_BYTES = 5 * 1024 * 1024
 
 if not os.path.exists(MUSIC_DIR):
     os.makedirs(MUSIC_DIR, exist_ok=True)
@@ -1168,6 +1170,10 @@ def music_list():
         item = dict(m)
         fname = os.path.basename(m.get('filename', ''))
         item['hasLyrics'] = bool(fname) and os.path.isfile(os.path.join(MUSIC_DIR, fname + '.lrc'))
+        cover_name = os.path.basename(m.get('cover', ''))
+        item['hasCover'] = bool(cover_name) and os.path.isfile(os.path.join(MUSIC_DIR, cover_name))
+        item['coverUrl'] = f'/music/cover/{fname}' if item['hasCover'] else None
+        item['coverVersion'] = os.stat(os.path.join(MUSIC_DIR, cover_name)).st_mtime_ns if item['hasCover'] else None
         result.append(item)
     return u.format_dict({'success': True, 'music': result})
 
@@ -1206,6 +1212,88 @@ def music_lyrics(filename):
     return send_from_directory(MUSIC_DIR, lrc_name, mimetype='text/plain', conditional=True)
 
 
+def save_music_cover(cover_file, music_filename):
+    """Validate and store one cover, returning its deterministic file name."""
+    ext = os.path.splitext(cover_file.filename or '')[1].lower()
+    if ext not in ALLOWED_COVER_EXTENSIONS:
+        raise ValueError(
+            f'unsupported cover type: {ext}. Allowed: {", ".join(sorted(ALLOWED_COVER_EXTENSIONS))}'
+        )
+    payload = cover_file.read(MAX_COVER_BYTES + 1)
+    if len(payload) > MAX_COVER_BYTES:
+        raise ValueError('cover image exceeds the 5 MB limit')
+    if not payload:
+        raise ValueError('cover image is empty')
+    safe_music_name = os.path.basename(music_filename)
+    cover_name = f'{safe_music_name}.cover{ext}'
+    with open(os.path.join(MUSIC_DIR, cover_name), 'wb') as target:
+        target.write(payload)
+    return cover_name
+
+
+def remove_music_cover_files(music_filename, keep=None):
+    """Remove covers for one track, optionally preserving the freshly written file."""
+    prefix = f'{os.path.basename(music_filename)}.cover'
+    for name in os.listdir(MUSIC_DIR):
+        if name.startswith(prefix) and name != keep:
+            try:
+                os.remove(os.path.join(MUSIC_DIR, name))
+            except FileNotFoundError:
+                pass
+
+
+@app.route('/music/cover/<path:filename>')
+def music_cover(filename):
+    """Serve the configured cover for one music file."""
+    safe_name = os.path.basename(filename)
+    d.load()
+    entry = next((m for m in d.data.get('music_files', []) if m.get('filename') == safe_name), None)
+    cover_name = os.path.basename(entry.get('cover', '')) if entry else ''
+    if not cover_name or not os.path.isfile(os.path.join(MUSIC_DIR, cover_name)):
+        return reterr(code='not found', message=f'cover not found: {safe_name}')
+    return send_from_directory(MUSIC_DIR, cover_name, conditional=True)
+
+
+@app.route('/music/cover/upload', methods=['POST'])
+def music_cover_upload():
+    """Add or replace the cover of an existing music file."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err
+    safe_name = os.path.basename(request.form.get('filename', ''))
+    cover_file = request.files.get('cover')
+    if not safe_name:
+        return reterr(code='bad request', message='filename is required')
+    if not cover_file or not cover_file.filename:
+        return reterr(code='bad request', message='cover is required')
+
+    with write_lock:
+        d.load()
+        music_files = d.data.get('music_files', [])
+        entry = next((m for m in music_files if m.get('filename') == safe_name), None)
+        if entry is None:
+            return reterr(code='not found', message=f'music file not found in list: {safe_name}')
+        try:
+            cover_name = save_music_cover(cover_file, safe_name)
+        except ValueError as exc:
+            return reterr(code='bad request', message=str(exc))
+        except Exception as exc:
+            u.error(f'Cover save failed: {exc}')
+            return reterr(code='server error', message='failed to save cover')
+        remove_music_cover_files(safe_name, keep=cover_name)
+        entry['cover'] = cover_name
+        d.dset('music_files', music_files)
+
+    return u.format_dict({
+        'success': True,
+        'code': 'OK',
+        'filename': safe_name,
+        'hasCover': True,
+        'coverUrl': f'/music/cover/{safe_name}',
+        'coverVersion': os.stat(os.path.join(MUSIC_DIR, cover_name)).st_mtime_ns,
+    })
+
+
 @app.route('/music/upload', methods=['POST'])
 def music_upload():
     """上传音乐文件（需管理员密钥）"""
@@ -1241,15 +1329,37 @@ def music_upload():
     title = request.form.get('title', '').strip() or base
     artist = request.form.get('artist', '').strip() or 'Unknown'
 
+    cover_name = None
+    cover_file = request.files.get('cover')
+    if cover_file and cover_file.filename:
+        try:
+            cover_name = save_music_cover(cover_file, save_name)
+        except ValueError as exc:
+            try:
+                os.remove(os.path.join(MUSIC_DIR, save_name))
+            except FileNotFoundError:
+                pass
+            return reterr(code='bad request', message=str(exc))
+        except Exception as exc:
+            try:
+                os.remove(os.path.join(MUSIC_DIR, save_name))
+            except FileNotFoundError:
+                pass
+            u.error(f'Cover save failed: {exc}')
+            return reterr(code='server error', message='failed to save cover')
+
     # 更新 data.json
     with write_lock:
         d.load()
         music_files = d.data.get('music_files', [])
-        music_files.append({
+        new_entry = {
             'filename': save_name,
             'title': title,
             'artist': artist
-        })
+        }
+        if cover_name:
+            new_entry['cover'] = cover_name
+        music_files.append(new_entry)
         d.dset('music_files', music_files)
 
     # 可选：随音乐一并上传的 LRC 歌词，存为 <音频文件名>.lrc（无则纯音乐）
@@ -1270,7 +1380,10 @@ def music_upload():
             'filename': save_name,
             'title': title,
             'artist': artist,
-            'hasLyrics': has_lyrics
+            'hasLyrics': has_lyrics,
+            'hasCover': bool(cover_name),
+            'coverUrl': f'/music/cover/{save_name}' if cover_name else None,
+            'coverVersion': os.stat(os.path.join(MUSIC_DIR, cover_name)).st_mtime_ns if cover_name else None,
         }
     })
 
@@ -1335,6 +1448,8 @@ def music_delete():
         pass
     except Exception as e:
         u.error(f'Failed to delete lyrics file: {e}')
+
+    remove_music_cover_files(safe_name)
 
     u.info(f'Music deleted: {safe_name}')
     return u.format_dict({'success': True, 'code': 'OK', 'deleted': safe_name})

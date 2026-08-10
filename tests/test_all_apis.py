@@ -162,7 +162,9 @@ class AllApiRoutesTest(unittest.TestCase):
             ("GET", "/music/list"),
             ("GET", "/music/<path:filename>"),
             ("GET", "/music/lyrics/<path:filename>"),
+            ("GET", "/music/cover/<path:filename>"),
             ("POST", "/music/upload"),
+            ("POST", "/music/cover/upload"),
             ("POST", "/music/delete"),
             ("POST", "/music/reorder"),
             ("GET", "/calendar/events"),
@@ -640,6 +642,7 @@ class AllApiRoutesTest(unittest.TestCase):
                 data={
                     "file": (io.BytesIO(b"fake mp3 bytes"), "contract.mp3"),
                     "lyrics": (io.BytesIO(b"[00:00.00]hello"), "contract.lrc"),
+                    "cover": (io.BytesIO(b"fake png bytes"), "cover.png"),
                     "title": "Contract song",
                     "artist": "Test artist",
                 },
@@ -648,10 +651,33 @@ class AllApiRoutesTest(unittest.TestCase):
         )
         filename = upload["file"]["filename"]
         self.assertTrue(upload["file"]["hasLyrics"])
+        self.assertTrue(upload["file"]["hasCover"])
 
         listing = self.json(self.client.get("/music/list"))
         self.assertEqual(listing["music"][0]["filename"], filename)
         self.assertTrue(listing["music"][0]["hasLyrics"])
+        self.assertTrue(listing["music"][0]["hasCover"])
+
+        cover = self.client.get(f"/music/cover/{filename}")
+        self.assertEqual(cover.status_code, 200)
+        self.assertEqual(cover.get_data(), b"fake png bytes")
+        cover.close()
+
+        replaced = self.json(
+            self.client.post(
+                "/music/cover/upload",
+                query_string={"secret": TEST_CONFIG["admin_secret"]},
+                data={
+                    "filename": filename,
+                    "cover": (io.BytesIO(b"replacement webp"), "replacement.webp"),
+                },
+                content_type="multipart/form-data",
+            )
+        )
+        self.assertTrue(replaced["hasCover"])
+        replaced_cover = self.client.get(f"/music/cover/{filename}")
+        self.assertEqual(replaced_cover.get_data(), b"replacement webp")
+        replaced_cover.close()
 
         stream = self.client.get(f"/music/{filename}")
         self.assertEqual(stream.status_code, 200)
@@ -680,6 +706,8 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )
         self.assertEqual(deleted["deleted"], filename)
+        deleted_cover = self.json(self.client.get(f"/music/cover/{filename}"))
+        self.assertFalse(deleted_cover["success"])
         missing = self.json(self.client.get(f"/music/{filename}"))
         self.assertFalse(missing["success"])
 
