@@ -6,7 +6,14 @@ analytics.sqlite3-wal
 recommendations.sqlite3
 recommendations.sqlite3-shm
 recommendations.sqlite3-wal
+agent_activity.sqlite3
+agent_activity.sqlite3-shm
+agent_activity.sqlite3-wal
 local.env.bat
+local.env.sh
+com.sleepy.upload-agent-stats.plist
+upload_agent_stats.sh
+前台应用状态.macro
 .env
 .env.*
 !.env.example
