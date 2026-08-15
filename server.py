@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 import json
+import tempfile
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
@@ -123,6 +124,13 @@ def get_online_count():
 
 # 写锁，保护对 data.json 的写入
 write_lock = threading.Lock()
+
+GITHUB_CACHE_TTL_SECONDS = 24 * 60 * 60
+GITHUB_CACHE_FILE = os.environ.get(
+    'SLEEPY_GITHUB_CACHE_FILE',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'github_stats_cache.json')
+)
+github_cache_lock = threading.Lock()
 
 # GeoIP 只在内存中保存加盐 IP 哈希与粗略位置，不保存原始 IP。
 # 40/min 略低于 ip-api 免费端点的 45/min，给部署检查等操作留出余量。
@@ -375,6 +383,15 @@ def get_recommendation_rate_limit_keys(req):
     return ip_key, client_key
 
 
+def get_automatic_recommendation_city(req):
+    """Best-effort coarse city lookup; never stores or returns the visitor IP."""
+    try:
+        client_ip = get_geoip_client_address(req)
+        return str(resolve_geoip_location(client_ip).get('city') or 'unknown')[:50]
+    except (GeoIpClientError, GeoIpUpstreamError, GeoIpRateLimitExceeded):
+        return 'unknown'
+
+
 @app.route('/pet/recommendations', methods=['GET', 'POST'])
 def pet_recommendations():
     """Submit or list song/book/game/anime recommendations for the site author."""
@@ -384,16 +401,37 @@ def pet_recommendations():
         try:
             payload = request.get_json(force=False, silent=False)
             category, content, user_name, city = validate_recommendation_payload(payload)
-            recommendation_limiter.check(*get_recommendation_rate_limit_keys(request))
+            is_admin = verify_admin_secret()
+            rate_limit_keys = None
+            if not is_admin:
+                ip_key, client_key = get_recommendation_rate_limit_keys(request)
+                recommendation_limiter.check(ip_key, client_key)
+                rate_limit_keys = {
+                    f'ip:{ip_key}', f'client:{client_key}',
+                }
+                # The frontend weather system already caches the visitor's city.
+                # Reuse it when supplied and keep GeoIP as a compatibility fallback
+                # for older clients or visitors without a usable location cache.
+                if city == 'unknown':
+                    city = get_automatic_recommendation_city(request)
         except RecommendationValidationError as exc:
             return reterr(code=exc.code, message=exc.message)
-        except RecommendationRateLimitExceeded:
+        except RecommendationRateLimitExceeded as exc:
+            if str(exc) == 'daily_limit':
+                return reterr(code='daily limit reached', message='one recommendation per day')
             return reterr(code='rate limited', message='recommendation limit exceeded')
         except Exception:
             return reterr(code='invalid JSON', message='expected a JSON object')
 
         try:
-            recommendation = recommendation_store.create(category, content, user_name, city)
+            if is_admin:
+                recommendation = recommendation_store.create(category, content, user_name, city)
+            else:
+                recommendation = recommendation_store.create_public_once_per_day(
+                    category, content, user_name, city, rate_limit_keys or set()
+                )
+        except RecommendationRateLimitExceeded:
+            return reterr(code='daily limit reached', message='one recommendation per day')
         except Exception:
             return reterr(code='server error', message='failed to save recommendation')
         return u.format_dict({
@@ -402,13 +440,11 @@ def pet_recommendations():
             'recommendation': recommendation,
         })
 
-    auth_err = require_admin()
-    if auth_err:
-        return auth_err
+    is_admin = verify_admin_secret()
     try:
         category, created_date = validate_recommendation_filters(
             request.args.get('category'),
-            request.args.get('date'),
+            request.args.get('date') if is_admin else None,
         )
     except RecommendationValidationError as exc:
         return reterr(code=exc.code, message=exc.message)
@@ -416,6 +452,7 @@ def pet_recommendations():
         recommendations = recommendation_store.list(
             category=category,
             created_date=created_date,
+            limit=None if is_admin else 10,
         )
     except Exception:
         return reterr(code='server error', message='failed to read recommendations')
@@ -424,6 +461,7 @@ def pet_recommendations():
         'recommendations': recommendations,
         'count': len(recommendations),
         'filters': {'category': category, 'date': created_date},
+        'scope': 'admin' if is_admin else 'public',
     })
 
 
@@ -683,7 +721,63 @@ def fetch_blog_extra():
     return result
 
 
+def _read_github_stats_cache():
+    try:
+        with open(GITHUB_CACHE_FILE, 'r', encoding='utf-8') as file:
+            cached = json.load(file)
+        if not isinstance(cached.get('data'), dict):
+            return None
+        return cached
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _write_github_stats_cache(result, now=None):
+    now = time.time() if now is None else now
+    cache_dir = os.path.dirname(os.path.abspath(GITHUB_CACHE_FILE))
+    os.makedirs(cache_dir, exist_ok=True)
+    payload = {
+        'cachedAt': datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        'cachedAtEpoch': now,
+        'data': result,
+    }
+    fd, tmp_path = tempfile.mkstemp(prefix='github_stats_', suffix='.json', dir=cache_dir)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, GITHUB_CACHE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def fetch_github_contributions():
+    """Return a fresh 24-hour cache entry, refreshing it lazily when expired."""
+    now = time.time()
+    with github_cache_lock:
+        cached = _read_github_stats_cache()
+        if cached and now - float(cached.get('cachedAtEpoch', 0)) < GITHUB_CACHE_TTL_SECONDS:
+            return cached['data']
+
+        result = _fetch_github_contributions_from_api()
+        if 'error' not in result:
+            try:
+                _write_github_stats_cache(result, now)
+            except OSError as exc:
+                u.error(f'GitHub cache write failed: {exc}')
+            return result
+
+        # A stale cache is preferable to hiding the GitHub card during a
+        # temporary API, network, or token failure.
+        if cached:
+            return cached['data']
+        return result
+
+
+def _fetch_github_contributions_from_api():
     """通过 GitHub GraphQL API 获取贡献热力图数据"""
     token = configured_value(d, 'SLEEPY_GITHUB_TOKEN', 'github_token', '')
     if not token or token == 'github_pat_xxx':
@@ -704,10 +798,14 @@ def fetch_github_contributions():
             }
           }
         }
-        repositories(first: 6, orderBy: {field: STARGAZERS, direction: DESC}, isFork: false) {
+        repositories(
+          first: 100
+          affiliations: [OWNER]
+          orderBy: {field: UPDATED_AT, direction: DESC}
+          isFork: false
+        ) {
           nodes {
             name
-            stargazerCount
             primaryLanguage {
               name
               color
@@ -763,12 +861,18 @@ def fetch_github_contributions():
             lang = repo.get('primaryLanguage')
             if lang and lang.get('name'):
                 name = lang['name']
+                repo_count = languages.get(name, {}).get('repoCount', 0) + 1
                 languages[name] = {
                     'name': name,
                     'color': lang.get('color', '#858585'),
-                    'stars': languages.get(name, {}).get('stars', 0) + repo.get('stargazerCount', 0)
+                    'repoCount': repo_count,
+                    # Compatibility alias: this value is now a repository count.
+                    'stars': repo_count
                 }
-        top_langs = sorted(languages.values(), key=lambda x: x['stars'], reverse=True)
+        top_langs = sorted(
+            languages.values(),
+            key=lambda x: (-x['repoCount'], x['name'].lower())
+        )
 
         return {
             'username': viewer['login'],
@@ -912,6 +1016,7 @@ def query():
             d.data['status'] = 1
             d.data['app_name'] = '关机中'
             d.data['timestamp'] = now_ts
+            append_status_history(d.data, 1, '关机中', now_ts)
             d.save()
         app_name = '关机中'
         st = 1
@@ -933,6 +1038,46 @@ def query():
         'timestamp': timestamp
     }
     return u.format_dict(ret)
+
+
+def resolved_status_info(data, status, app_name):
+    try:
+        info = dict(data['status_list'][status])
+        if status == 0 or app_name == '关机中':
+            info['name'] = app_name
+        return info
+    except (KeyError, IndexError, TypeError):
+        return {'status': status, 'name': app_name or '未知'}
+
+
+def append_status_history(data, status, app_name, timestamp):
+    history = data.setdefault('status_history', [])
+    item = {
+        'status': int(status),
+        'app_name': str(app_name or ''),
+        'timestamp': int(timestamp),
+    }
+    if history and history[-1].get('status') == item['status'] and history[-1].get('app_name') == item['app_name']:
+        history[-1] = item
+    else:
+        history.append(item)
+    data['status_history'] = history[-5:]
+
+
+@app.route('/status-history')
+def status_history():
+    d.load()
+    items = []
+    for entry in reversed(d.data.get('status_history', [])[-5:]):
+        status = int(entry.get('status', 99))
+        app_name = str(entry.get('app_name') or '')
+        items.append({
+            'status': status,
+            'app_name': app_name,
+            'timestamp': entry.get('timestamp'),
+            'info': resolved_status_info(d.data, status, app_name),
+        })
+    return u.format_dict({'success': True, 'history': items})
 
 
 @app.route('/get/status_list')
@@ -977,6 +1122,9 @@ def set_normal():
             d.data['app_name'] = app_name
             if timestamp is not None:
                 d.data['timestamp'] = timestamp
+            effective_timestamp = timestamp if timestamp is not None else int(time.time())
+            d.data['timestamp'] = effective_timestamp
+            append_status_history(d.data, status, app_name, effective_timestamp)
             d.save()
         u.info('set success')
         ret = {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
@@ -129,6 +129,13 @@ class RecommendationStore:
 
                 CREATE INDEX IF NOT EXISTS idx_pet_recommendations_category
                     ON pet_recommendations(category);
+
+                CREATE TABLE IF NOT EXISTS recommendation_daily_limits (
+                    created_date TEXT NOT NULL,
+                    identity_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (created_date, identity_key)
+                );
                 """
             )
             columns = {
@@ -190,10 +197,11 @@ class RecommendationStore:
         *,
         category: str | None = None,
         created_date: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         self.initialize()
         clauses: list[str] = []
-        values: list[str] = []
+        values: list[Any] = []
         if category:
             clauses.append("category = ?")
             values.append(category)
@@ -201,6 +209,9 @@ class RecommendationStore:
             clauses.append("created_date = ?")
             values.append(created_date)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            values.append(max(1, min(1000, int(limit))))
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -208,10 +219,61 @@ class RecommendationStore:
                 FROM pet_recommendations
                 """
                 + where
-                + " ORDER BY id DESC",
+                + " ORDER BY id DESC"
+                + limit_clause,
                 values,
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def create_public_once_per_day(
+        self,
+        category: str,
+        content: str,
+        user_name: str,
+        city: str,
+        identity_keys: set[str],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Reserve the daily identities and create the recommendation atomically."""
+        current = now or datetime.now().astimezone()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        created_date = current.date().isoformat()
+        created_at = current.astimezone(timezone.utc).isoformat()
+        self.initialize()
+        try:
+            with self._connect() as connection:
+                connection.executemany(
+                    """
+                    INSERT INTO recommendation_daily_limits
+                        (created_date, identity_key, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(created_date, key, created_at) for key in sorted(identity_keys)],
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO pet_recommendations
+                        (category, content, user_name, city, created_at, created_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (category, content, user_name, city, created_at, created_date),
+                )
+                row = connection.execute(
+                    """
+                    SELECT id, category, content, user_name, city, created_at
+                    FROM pet_recommendations WHERE id = ?
+                    """,
+                    (cursor.lastrowid,),
+                ).fetchone()
+                connection.execute(
+                    "DELETE FROM recommendation_daily_limits WHERE created_date < ?",
+                    ((current.date() - timedelta(days=2)).isoformat(),),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise RecommendationRateLimitExceeded("daily_limit") from exc
+        return self._row(row)
 
     def delete(self, recommendation_id: int) -> bool:
         self.initialize()

@@ -177,6 +177,7 @@ class AllApiRoutesTest(unittest.TestCase):
             ("GET", "/pet/recommendations"),
             ("POST", "/pet/recommendations"),
             ("DELETE", "/pet/recommendations/<int:recommendation_id>"),
+            ("GET", "/status-history"),
         }
         actual = {
             (method, rule.rule)
@@ -253,6 +254,11 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(query["status"], 1)
         self.assertGreater(query["timestamp"], 0)
 
+        history = self.json(self.client.get("/status-history"))
+        self.assertTrue(history["success"])
+        self.assertEqual(history["history"][0]["app_name"], "Sleeping")
+        self.assertEqual(history["history"][0]["info"]["name"], "Offline")
+
         online = self.json(
             self.client.get(
                 "/online_count",
@@ -269,6 +275,39 @@ class AllApiRoutesTest(unittest.TestCase):
             )
         )
         self.assertFalse(denied["success"])
+
+    def test_status_history_keeps_five_and_deduplicates_consecutive_states(self):
+        backend.d.data["status_history"] = []
+        backend.d.save()
+        base = int(time.time())
+        for index in range(6):
+            result = self.json(self.client.get(
+                "/set",
+                query_string={
+                    "secret": TEST_CONFIG["secret"],
+                    "status": 0,
+                    "app_name": f"App-{index}",
+                    "timestamp": base + index,
+                },
+            ))
+            self.assertTrue(result["success"])
+        history = self.json(self.client.get("/status-history"))["history"]
+        self.assertEqual(len(history), 5)
+        self.assertEqual(history[0]["app_name"], "App-5")
+        self.assertEqual(history[-1]["app_name"], "App-1")
+
+        self.client.get(
+            "/set",
+            query_string={
+                "secret": TEST_CONFIG["secret"],
+                "status": 0,
+                "app_name": "App-5",
+                "timestamp": base + 100,
+            },
+        )
+        deduplicated = self.json(self.client.get("/status-history"))["history"]
+        self.assertEqual(len(deduplicated), 5)
+        self.assertEqual(deduplicated[0]["timestamp"], base + 100)
 
     def test_geoip_distinguishes_client_rate_limit_and_upstream_failures(self):
         invalid = self.client.get("/geoip")
@@ -345,9 +384,24 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(anonymous["user_name"], "unknown")
         self.assertEqual(anonymous["city"], "unknown")
 
+        public_named = self.json(
+            self.client.post(
+                "/pet/recommendations",
+                json={
+                    "category": "book",
+                    "content": "三体",
+                    "user_name": "读者小明",
+                },
+                headers={"X-Client-ID": "reader-public-named"},
+                environ_base={"REMOTE_ADDR": "203.0.113.42"},
+            )
+        )["recommendation"]
+        self.assertEqual(public_named["user_name"], "读者小明")
+
         named = self.json(
             self.client.post(
                 "/pet/recommendations",
+                query_string={"secret": TEST_CONFIG["admin_secret"]},
                 json={
                     "category": "music",
                     "content": "晴天",
@@ -360,8 +414,19 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(named["user_name"], "Tonks")
         self.assertEqual(named["city"], "福州")
 
-        denied_list = self.json(self.client.get("/pet/recommendations"))
-        self.assertFalse(denied_list["success"])
+        public_list = self.json(self.client.get("/pet/recommendations"))
+        self.assertTrue(public_list["success"])
+        self.assertEqual(public_list["scope"], "public")
+        self.assertEqual(public_list["count"], 3)
+
+        daily_denied = self.json(
+            self.client.post(
+                "/pet/recommendations",
+                json={"category": "game", "content": "第二次推荐"},
+                headers={"X-Client-ID": "reader-1"},
+            )
+        )
+        self.assertEqual(daily_denied["code"], "daily limit reached")
 
         all_items = self.json(
             self.client.get(
@@ -369,7 +434,7 @@ class AllApiRoutesTest(unittest.TestCase):
                 query_string={"secret": TEST_CONFIG["admin_secret"]},
             )
         )
-        self.assertEqual(all_items["count"], 2)
+        self.assertEqual(all_items["count"], 3)
         self.assertEqual(all_items["recommendations"][0]["id"], named["id"])
 
         music = self.json(
@@ -394,7 +459,7 @@ class AllApiRoutesTest(unittest.TestCase):
                 },
             )
         )
-        self.assertEqual(dated["recommendations"], [anonymous])
+        self.assertEqual(dated["recommendations"], [public_named, anonymous])
 
         invalid = self.json(
             self.client.post(
@@ -427,8 +492,25 @@ class AllApiRoutesTest(unittest.TestCase):
                     query_string={"secret": TEST_CONFIG["admin_secret"]},
                 )
             )["count"],
-            1,
+            2,
         )
+
+    def test_public_recommendation_reuses_client_cached_city(self):
+        with mock.patch.object(backend, "get_automatic_recommendation_city") as lookup:
+            recommendation = self.json(
+                self.client.post(
+                    "/pet/recommendations",
+                    json={
+                        "category": "book",
+                        "content": "三体",
+                        "city": "福州",
+                    },
+                    headers={"X-Client-ID": "reader-with-cached-city"},
+                )
+            )["recommendation"]
+
+        self.assertEqual(recommendation["city"], "福州")
+        lookup.assert_not_called()
 
     def test_agent_activity_get_and_post(self):
         payload = {
@@ -770,6 +852,60 @@ class AllApiRoutesTest(unittest.TestCase):
             result = self.json(self.client.get("/github/stats"))
         self.assertTrue(result["success"])
         self.assertEqual(result["username"], "contract-user")
+
+    def test_github_language_stats_use_repository_count(self):
+        source = Path(backend.__file__).read_text(encoding="utf-8")
+        self.assertIn("affiliations: [OWNER]", source)
+        self.assertIn("first: 100", source)
+        self.assertNotIn("orderBy: {field: STARGAZERS", source)
+        self.assertIn("'repoCount': repo_count", source)
+
+    def test_github_stats_cache_is_reused_for_24_hours(self):
+        cache_file = workspace / "github-stats-cache.json"
+        payload = {
+            "username": "cache-user",
+            "totalContributions": 9,
+            "days": [],
+            "topLanguages": [],
+        }
+        with (
+            mock.patch.object(backend, "GITHUB_CACHE_FILE", str(cache_file)),
+            mock.patch.object(
+                backend, "_fetch_github_contributions_from_api", return_value=payload
+            ) as fetch,
+        ):
+            self.assertEqual(backend.fetch_github_contributions(), payload)
+            self.assertEqual(backend.fetch_github_contributions(), payload)
+
+        self.assertEqual(fetch.call_count, 1)
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        self.assertIn("cachedAt", cached)
+        self.assertEqual(cached["data"], payload)
+
+    def test_github_stats_expired_cache_refreshes_and_falls_back(self):
+        cache_file = workspace / "github-stats-expired.json"
+        stale = {
+            "username": "stale-user",
+            "totalContributions": 3,
+            "days": [],
+            "topLanguages": [],
+        }
+        cache_file.write_text(json.dumps({
+            "cachedAt": "2026-08-01T00:00:00+00:00",
+            "cachedAtEpoch": 1,
+            "data": stale,
+        }), encoding="utf-8")
+        with (
+            mock.patch.object(backend, "GITHUB_CACHE_FILE", str(cache_file)),
+            mock.patch.object(
+                backend,
+                "_fetch_github_contributions_from_api",
+                return_value={"error": "GitHub API HTTP 403"},
+            ) as fetch,
+        ):
+            self.assertEqual(backend.fetch_github_contributions(), stale)
+
+        fetch.assert_called_once_with()
 
     def test_todos_routes_full_lifecycle(self):
         added = self.json(

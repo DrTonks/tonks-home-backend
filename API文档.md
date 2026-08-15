@@ -764,12 +764,16 @@ async getHolidays(year) {
         { "date": "2025-07-24", "count": 0, "level": 0 }
     ],
     "topLanguages": [
-        { "name": "Vue", "color": "#41b883", "stars": 3 },
-        { "name": "Python", "color": "#3572A5", "stars": 2 },
-        { "name": "TypeScript", "color": "#3178c6", "stars": 1 }
+        { "name": "Vue", "color": "#41b883", "repoCount": 3, "stars": 3 },
+        { "name": "Python", "color": "#3572A5", "repoCount": 2, "stars": 2 },
+        { "name": "TypeScript", "color": "#3178c6", "repoCount": 1, "stars": 1 }
     ]
 }
 ```
+
+`topLanguages` 按当前 Token 可读取的、用户本人拥有的非 Fork 仓库数量统计，最多检查最近更新的 100 个仓库。`repoCount` 是仓库数；`stars` 为兼容旧前端的别名，值与 `repoCount` 相同，不再表示 Star 数。Token 具有私有仓库读取权限时，私有仓库也会纳入统计；否则只统计可见的公开仓库。没有可识别主要语言的仓库不计入语言榜。
+
+成功获取的 GitHub 统计会保存到本地 `github_stats_cache.json`，并记录 UTC 缓存时间。24 小时内的请求直接使用缓存；过期后的首个请求才刷新 GitHub 数据。如果刷新失败，接口会回退到上一份缓存。可使用 `SLEEPY_GITHUB_CACHE_FILE` 自定义缓存文件路径。
 
 **level 等级说明**:
 | level | 说明 |
@@ -933,7 +937,7 @@ data: {"type":"error","code":"provider_unavailable"}
 
 ### POST `/pet/recommendations` — 提交推荐
 
-公开接口，用于把用户本次填写的歌曲、书、游戏或番剧推荐给网站作者。该接口只保存推荐内容，不调用大模型。
+公开接口，用于把歌曲、书、游戏或番剧推荐给网站作者。该接口只保存推荐内容，不调用大模型。
 
 ```json
 {
@@ -948,8 +952,8 @@ data: {"type":"error","code":"provider_unavailable"}
 |------|------|------|
 | `category` | 是 | `music`、`book`、`game`、`anime` 四选一 |
 | `content` | 是 | 1–100 字符 |
-| `user_name` | 否 | 最多 30 字符；缺失或空值统一存为 `unknown` |
-| `city` | 否 | 最多 50 字符；来自浏览器已有的粗粒度城市缓存，缺失或空值统一存为 `unknown` |
+| `user_name` | 否 | 优先保存提交的称呼；未提供时保存为 `unknown`，前端显示“匿名访客”；最多 30 字符 |
+| `city` | 否 | 普通访客由服务端粗粒度 IP 定位自动补充；管理员可自定义，最多 50 字符 |
 | 整个请求体 | 是 | 最多 1024 字节 |
 
 建议同时发送 `X-Client-ID` 请求头。成功响应：
@@ -969,13 +973,19 @@ data: {"type":"error","code":"provider_unavailable"}
 }
 ```
 
-默认限制为同一 IP、同一 `X-Client-ID` 各每分钟 6 次、每天 30 次。`user_name` 只是用户填写的显示名，不是可信身份，`city` 也是客户端提交的显示信息而非可信定位。前端展示 `content`、`user_name` 与 `city` 时必须使用文本节点，不得作为 HTML 插入。推荐接口不接收或保存 IP、经纬度、region、country。
+普通访客限制为同一 IP 或同一 `X-Client-ID` 每个服务器本地自然日最多成功提交一次；限额记录持久化在推荐 SQLite 数据库中，服务重启后仍生效。请求携带 `user_name` 时会优先保存该称呼，未提供时保存为 `unknown`；附带合法 `?secret=<ADMIN_SECRET>` 的管理员提交不受次数限制，并可自定义 `city`。前端展示字段时必须使用文本节点，不得作为 HTML 插入。接口不保存原始 IP、经纬度、region 或 country，只保存粗粒度城市。
+
+超过每日限额：
+
+```json
+{ "success": false, "code": "daily limit reached", "message": "one recommendation per day" }
+```
 
 ---
 
-### GET `/pet/recommendations` — 管理员查询推荐
+### GET `/pet/recommendations` — 查询推荐
 
-管理员接口，需要 `?secret=<ADMIN_SECRET>`。没有筛选参数时返回全部推荐，按 ID 倒序排列；未认证请求不会返回昵称、城市或推荐内容。
+公开请求返回最近 10 条推荐，按 ID 倒序排列，可使用 `category` 筛选，传入的 `date` 会被忽略。附带合法 `?secret=<ADMIN_SECRET>` 时进入管理员范围，返回全部记录并允许日期筛选。
 
 | Query 参数 | 必填 | 说明 |
 |------------|------|------|
@@ -1002,11 +1012,37 @@ GET /pet/recommendations?category=book&date=2026-08-08&secret=<ADMIN_SECRET>
     }
   ],
   "count": 1,
-  "filters": { "category": "book", "date": "2026-08-08" }
+  "filters": { "category": "book", "date": "2026-08-08" },
+  "scope": "admin"
 }
 ```
 
 无结果时 `recommendations` 为 `[]`、`count` 为 `0`。日期无效返回 `invalid_date`，分类无效返回 `unknown_category`。
+
+---
+
+### GET `/status-history` — 最近状态历史
+
+返回最近 5 次不同的设备状态，按新到旧排列。连续上报相同状态只更新时间，不重复增加记录；数据保存在 `data.json` 的 `status_history` 中。
+
+```json
+{
+  "success": true,
+  "history": [
+    {
+      "status": 0,
+      "app_name": "VSCode 编辑器",
+      "timestamp": 1786539600,
+      "info": {
+        "id": 0,
+        "name": "VSCode 编辑器",
+        "desc": "awake",
+        "color": "awake"
+      }
+    }
+  ]
+}
+```
 
 ---
 

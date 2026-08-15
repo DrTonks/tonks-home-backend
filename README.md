@@ -8,6 +8,7 @@
 - `SLEEPY_ANALYTICS_DB`：可选，覆盖 SQLite 文件路径。
 - `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `SLEEPY_ADMIN_SECRET`。
 - `SLEEPY_CORS_ORIGINS`：可选，逗号分隔的允许来源；同源反向代理部署无需配置。
+- `SLEEPY_RECOMMENDATIONS_DB`：可选，推荐收件箱和普通访客每日额度的 SQLite 路径。未配置时自动使用程序目录下的 `recommendations.sqlite3`；普通物理机部署且代码目录持久、可写时无需额外配置。仅在容器临时文件系统、多实例或数据与代码分离部署时建议显式指向持久卷。
 
 完整回归测试：
 
@@ -110,6 +111,7 @@ python upload_agent_stats.py --server https://status.example.com --secret YOUR_A
 以下内容默认不会进入 Git：
 
 - `data.json`：运行时状态、个人日历、音乐和待办等动态数据。
+- `recommendations.sqlite3` 及其 `-wal`、`-shm` 文件：推荐内容及匿名每日额度；迁移时应停服后整体备份，容器部署需挂载持久卷。
 - `.env`：服务端密钥、GitHub token、AI 密钥与静态运行配置。
 - `local.env.bat` 与 `.env*`：本地地址和密钥。
 - `部署指南.md`、本地诊断日志与上传的 `music/` 文件。

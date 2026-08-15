@@ -47,3 +47,4 @@ Thumbs.db
 # Locally uploaded media: keep the empty directory with .gitkeep only
 music/*
 !music/.gitkeep
+github_stats_cache.json

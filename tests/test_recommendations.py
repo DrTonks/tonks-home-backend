@@ -109,6 +109,26 @@ class RecommendationStoreTests(unittest.TestCase):
         created = self.store.create("music", "晴天", "Tonks")
         self.assertEqual(created["city"], "unknown")
 
+    def test_public_daily_claim_is_persistent_and_atomic(self):
+        now = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+        created = self.store.create_public_once_per_day(
+            "music", "晴天", "终端访客", "福州", {"ip:a", "client:a"}, now=now
+        )
+        self.assertEqual(created["content"], "晴天")
+        reloaded = RecommendationStore(str(self.database))
+        with self.assertRaises(RecommendationRateLimitExceeded):
+            reloaded.create_public_once_per_day(
+                "book", "活着", "终端访客", "福州", {"ip:a", "client:b"}, now=now
+            )
+        self.assertEqual([item["content"] for item in reloaded.list()], ["晴天"])
+
+    def test_public_list_limit(self):
+        for index in range(12):
+            self.store.create("book", f"book-{index}", "tester")
+        items = self.store.list(limit=10)
+        self.assertEqual(len(items), 10)
+        self.assertEqual(items[0]["content"], "book-11")
+
 
 class RecommendationRateLimiterTests(unittest.TestCase):
     def test_client_or_ip_rotation_does_not_bypass_limits(self):
