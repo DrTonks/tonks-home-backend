@@ -771,7 +771,7 @@ async getHolidays(year) {
 }
 ```
 
-`topLanguages` 按当前 Token 可读取的、用户本人拥有的非 Fork 仓库数量统计，最多检查最近更新的 100 个仓库。`repoCount` 是仓库数；`stars` 为兼容旧前端的别名，值与 `repoCount` 相同，不再表示 Star 数。Token 具有私有仓库读取权限时，私有仓库也会纳入统计；否则只统计可见的公开仓库。没有可识别主要语言的仓库不计入语言榜。
+`topLanguages` 使用“本人拥有的非 Fork 仓库数 + 最近贡献过的外部仓库数”统计。本人仓库最多检查最近更新的 100 个；外部仓库根据 GitHub 贡献日历时间范围内的 Commit contribution 识别，最多 100 个。每个外部仓库无论提交多少次都只计 1，并按 `nameWithOwner` 去重；本人仓库不会因贡献记录重复计数。`repoCount` 是合计仓库数；`stars` 为兼容旧前端的别名，值与 `repoCount` 相同，不再表示 Star 数。Token 具有私有仓库读取权限时，可读取的私有仓库也会纳入统计。没有可识别主要语言的仓库不计入语言榜。
 
 成功获取的 GitHub 统计会保存到本地 `github_stats_cache.json`，并记录 UTC 缓存时间。24 小时内的请求直接使用缓存；过期后的首个请求才刷新 GitHub 数据。如果刷新失败，接口会回退到上一份缓存。可使用 `SLEEPY_GITHUB_CACHE_FILE` 自定义缓存文件路径。
 
@@ -1516,4 +1516,3 @@ axios.interceptors.response.use(
 3. **data.json 并发安全**: 写操作使用线程锁 + 原子写入，多进程部署需注意
 4. **时间戳**: `/query` 返回的 timestamp 是 Unix 秒级时间戳
 5. **管理员密钥防护**: secret 通过 URL 传参，建议仅在可信网络中使用或通过 HTTPS 加密传输
-

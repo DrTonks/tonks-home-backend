@@ -126,6 +126,7 @@ def get_online_count():
 write_lock = threading.Lock()
 
 GITHUB_CACHE_TTL_SECONDS = 24 * 60 * 60
+GITHUB_CACHE_VERSION = 2
 GITHUB_CACHE_FILE = os.environ.get(
     'SLEEPY_GITHUB_CACHE_FILE',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'github_stats_cache.json')
@@ -725,6 +726,8 @@ def _read_github_stats_cache():
     try:
         with open(GITHUB_CACHE_FILE, 'r', encoding='utf-8') as file:
             cached = json.load(file)
+        if cached.get('version') != GITHUB_CACHE_VERSION:
+            return None
         if not isinstance(cached.get('data'), dict):
             return None
         return cached
@@ -737,6 +740,7 @@ def _write_github_stats_cache(result, now=None):
     cache_dir = os.path.dirname(os.path.abspath(GITHUB_CACHE_FILE))
     os.makedirs(cache_dir, exist_ok=True)
     payload = {
+        'version': GITHUB_CACHE_VERSION,
         'cachedAt': datetime.fromtimestamp(now, timezone.utc).isoformat(),
         'cachedAtEpoch': now,
         'data': result,
@@ -777,6 +781,51 @@ def fetch_github_contributions():
         return result
 
 
+def _aggregate_github_languages(viewer):
+    """Count owned repositories and distinct external contribution repositories."""
+    languages = {}
+    counted_repositories = set()
+
+    def add_repository(repo):
+        repo_key = repo.get('nameWithOwner') or repo.get('name')
+        lang = repo.get('primaryLanguage')
+        if not repo_key or repo_key.lower() in counted_repositories:
+            return
+        if not lang or not lang.get('name'):
+            return
+        counted_repositories.add(repo_key.lower())
+        name = lang['name']
+        repo_count = languages.get(name, {}).get('repoCount', 0) + 1
+        languages[name] = {
+            'name': name,
+            'color': lang.get('color', '#858585'),
+            'repoCount': repo_count,
+            # Compatibility alias: this value is now a repository count.
+            'stars': repo_count
+        }
+
+    for repo in viewer['repositories']['nodes']:
+        add_repository(repo)
+
+    viewer_login = viewer['login'].lower()
+    for contribution in viewer['contributionsCollection'].get(
+        'commitContributionsByRepository', []
+    ):
+        repo = contribution.get('repository') or {}
+        owner_login = (repo.get('owner') or {}).get('login')
+        total_count = (contribution.get('contributions') or {}).get('totalCount', 0)
+        if owner_login and owner_login.lower() == viewer_login:
+            continue
+        if total_count < 1:
+            continue
+        add_repository(repo)
+
+    return sorted(
+        languages.values(),
+        key=lambda item: (-item['repoCount'], item['name'].lower())
+    )
+
+
 def _fetch_github_contributions_from_api():
     """通过 GitHub GraphQL API 获取贡献热力图数据"""
     token = configured_value(d, 'SLEEPY_GITHUB_TOKEN', 'github_token', '')
@@ -797,6 +846,21 @@ def _fetch_github_contributions_from_api():
               }
             }
           }
+          commitContributionsByRepository(maxRepositories: 100) {
+            repository {
+              nameWithOwner
+              owner {
+                login
+              }
+              primaryLanguage {
+                name
+                color
+              }
+            }
+            contributions {
+              totalCount
+            }
+          }
         }
         repositories(
           first: 100
@@ -806,6 +870,7 @@ def _fetch_github_contributions_from_api():
         ) {
           nodes {
             name
+            nameWithOwner
             primaryLanguage {
               name
               color
@@ -855,24 +920,7 @@ def _fetch_github_contributions_from_api():
                 'level': _intensity_level(c, l1, l2, l3)
             })
 
-        # 技术栈汇总
-        languages = {}
-        for repo in viewer['repositories']['nodes']:
-            lang = repo.get('primaryLanguage')
-            if lang and lang.get('name'):
-                name = lang['name']
-                repo_count = languages.get(name, {}).get('repoCount', 0) + 1
-                languages[name] = {
-                    'name': name,
-                    'color': lang.get('color', '#858585'),
-                    'repoCount': repo_count,
-                    # Compatibility alias: this value is now a repository count.
-                    'stars': repo_count
-                }
-        top_langs = sorted(
-            languages.values(),
-            key=lambda x: (-x['repoCount'], x['name'].lower())
-        )
+        top_langs = _aggregate_github_languages(viewer)
 
         return {
             'username': viewer['login'],

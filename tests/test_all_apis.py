@@ -860,6 +860,50 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertNotIn("orderBy: {field: STARGAZERS", source)
         self.assertIn("'repoCount': repo_count", source)
 
+    def test_github_languages_add_distinct_external_contribution_repositories(self):
+        viewer = {
+            "login": "contract-user",
+            "repositories": {"nodes": [{
+                "name": "owned-python",
+                "nameWithOwner": "contract-user/owned-python",
+                "primaryLanguage": {"name": "Python", "color": "#3572A5"},
+            }]},
+            "contributionsCollection": {
+                "commitContributionsByRepository": [
+                    {
+                        "repository": {
+                            "nameWithOwner": "open-source/web-app",
+                            "owner": {"login": "open-source"},
+                            "primaryLanguage": {"name": "TypeScript", "color": "#3178c6"},
+                        },
+                        "contributions": {"totalCount": 12},
+                    },
+                    {
+                        "repository": {
+                            "nameWithOwner": "OPEN-SOURCE/WEB-APP",
+                            "owner": {"login": "open-source"},
+                            "primaryLanguage": {"name": "TypeScript", "color": "#3178c6"},
+                        },
+                        "contributions": {"totalCount": 2},
+                    },
+                    {
+                        "repository": {
+                            "nameWithOwner": "contract-user/owned-python",
+                            "owner": {"login": "contract-user"},
+                            "primaryLanguage": {"name": "Python", "color": "#3572A5"},
+                        },
+                        "contributions": {"totalCount": 30},
+                    },
+                ]
+            },
+        }
+
+        languages = backend._aggregate_github_languages(viewer)
+        self.assertEqual(
+            [(item["name"], item["repoCount"]) for item in languages],
+            [("Python", 1), ("TypeScript", 1)],
+        )
+
     def test_github_stats_cache_is_reused_for_24_hours(self):
         cache_file = workspace / "github-stats-cache.json"
         payload = {
@@ -891,6 +935,7 @@ class AllApiRoutesTest(unittest.TestCase):
             "topLanguages": [],
         }
         cache_file.write_text(json.dumps({
+            "version": backend.GITHUB_CACHE_VERSION,
             "cachedAt": "2026-08-01T00:00:00+00:00",
             "cachedAtEpoch": 1,
             "data": stale,
