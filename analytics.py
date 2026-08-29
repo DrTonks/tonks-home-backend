@@ -61,6 +61,15 @@ class BlogAnalytics:
 
                 CREATE INDEX IF NOT EXISTS idx_article_view_dedup_created_at
                     ON article_view_dedup(created_at);
+
+                CREATE TABLE IF NOT EXISTS site_visit_sessions (
+                    visit_hash TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_site_visit_sessions_source
+                    ON site_visit_sessions(source);
                 """
             )
 
@@ -125,6 +134,40 @@ class BlogAnalytics:
             ).fetchall()
         found = {str(row["slug"]): int(row["views"]) for row in rows}
         return {slug: found.get(slug, 0) for slug in unique_slugs}
+
+    def record_site_visit(
+        self,
+        visit_hash: str,
+        source: str,
+        *,
+        now: int | None = None,
+    ) -> tuple[int, bool]:
+        """Record one cross-site entry per frontend page session."""
+        timestamp = int(time.time()) if now is None else int(now)
+        self.initialize()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO site_visit_sessions
+                    (visit_hash, source, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (visit_hash, source, timestamp),
+            )
+            counted = cursor.rowcount == 1
+            row = connection.execute(
+                "SELECT COUNT(*) AS visits FROM site_visit_sessions"
+            ).fetchone()
+        return (int(row["visits"]) if row else 0, counted)
+
+    def get_site_visits(self) -> int:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS visits FROM site_visit_sessions"
+            ).fetchone()
+        return int(row["visits"]) if row else 0
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ class OpenAICompatibleProvider:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         if not self.config.available:
             raise ProviderError("not_configured")
@@ -31,8 +34,8 @@ class OpenAICompatibleProvider:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": self.config.max_output_tokens,
+            "temperature": max(0.0, min(2.0, float(temperature))),
+            "max_tokens": max_tokens or self.config.max_output_tokens,
         }
         if self.config.endpoint.startswith("https://api.deepseek.com/"):
             payload["thinking"] = {

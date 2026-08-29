@@ -6,6 +6,9 @@ analytics.sqlite3-wal
 recommendations.sqlite3
 recommendations.sqlite3-shm
 recommendations.sqlite3-wal
+community.sqlite3
+community.sqlite3-shm
+community.sqlite3-wal
 agent_activity.sqlite3
 agent_activity.sqlite3-shm
 agent_activity.sqlite3-wal

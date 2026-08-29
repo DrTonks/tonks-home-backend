@@ -8,7 +8,7 @@ load_env_file(os.environ.get('SLEEPY_ENV_FILE') or None)
 import utils as u
 from datetime import datetime, timedelta, timezone
 from data import data as data_init
-from flask import Flask, request, send_from_directory
+from flask import Flask, Response, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 import threading
@@ -36,6 +36,19 @@ from recommendations import (
     validate_recommendation_filters,
     validate_recommendation_payload,
 )
+from community import (
+    CommunityBurstLimiter,
+    CommunityRateLimitExceeded,
+    CommunityStore,
+    CommunityValidationError,
+    community_limit_from_env,
+    validate_friend_application_payload,
+    normalize_comment_page,
+    normalize_email,
+    normalize_like_target,
+    validate_comment_payload,
+)
+from comment_moderation import CommentModerationService, ModerationResult
 
 
 d = data_init()
@@ -50,6 +63,17 @@ recommendation_limiter = RecommendationRateLimiter(
     daily_limit=recommendation_limit_from_env(
         'SLEEPY_RECOMMENDATION_DAILY_LIMIT', 30, 1000
     ),
+)
+community_store = CommunityStore()
+comment_moderator = CommentModerationService()
+community_comment_limiter = CommunityBurstLimiter(
+    community_limit_from_env('SLEEPY_COMMENT_MINUTE_LIMIT', 3, 60)
+)
+community_like_limiter = CommunityBurstLimiter(
+    community_limit_from_env('SLEEPY_LIKE_MINUTE_LIMIT', 30, 300)
+)
+friend_application_limiter = CommunityBurstLimiter(
+    community_limit_from_env('SLEEPY_FRIEND_APPLICATION_MINUTE_LIMIT', 2, 20)
 )
 
 app = Flask(__name__, static_folder=None)
@@ -69,8 +93,11 @@ def add_configured_cors_headers(response):
     }
     if origin and origin in allowed_origins:
         response.headers['Access-Control-Allow-Origin'] = origin
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Client-ID'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PATCH, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = (
+            'Content-Type, X-Client-ID, X-Visit-ID, X-Site-Source, '
+            'Authorization, X-Admin-Secret'
+        )
         response.headers['Vary'] = 'Origin'
     return response
 
@@ -146,6 +173,7 @@ geoip_upstream_attempts = deque()
 geoip_runtime_salt = os.urandom(32).hex()
 
 BLOG_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
+SITE_VISIT_ID_RE = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
 
 # --- 辅助函数 ---
 
@@ -352,11 +380,38 @@ def get_blog_visitor_hash(req):
     return hashlib.sha256(f'{salt}|{identity}'.encode('utf-8')).hexdigest()
 
 
+def get_community_rate_limit_keys(req):
+    """Return salted IP/client keys for public interaction rate limits."""
+    client_id = str(req.headers.get('X-Client-ID') or 'missing')[:200]
+    remote = req.remote_addr or 'unknown'
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    ip_key = hashlib.sha256(
+        f'{salt}|community-ip|{remote}'.encode('utf-8')
+    ).hexdigest()
+    client_key = hashlib.sha256(
+        f'{salt}|community-client|{client_id}'.encode('utf-8')
+    ).hexdigest()
+    return ip_key, client_key
+
+
+def get_community_actor_hash(email):
+    """Group comment history by normalized email without exposing it to the model."""
+    normalized = normalize_email(email)
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    return hashlib.sha256(
+        f'{salt}|community-email|{normalized}'.encode('utf-8')
+    ).hexdigest()
+
+
 # === 管理员认证 ===
 
 def verify_admin_secret():
-    """验证管理员密钥（从 URL query param ?secret=xxx 传入）"""
-    secret = request.args.get("secret", "")
+    """验证管理员密钥（兼容 query param 与 X-Admin-Secret header）。"""
+    secret = request.args.get("secret", "") or request.headers.get("X-Admin-Secret", "")
     admin_secret = configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
     return secret == admin_secret and secret != ""
 
@@ -1334,6 +1389,390 @@ def record_blog_view(slug):
         'views': views,
         'counted': counted,
     })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/site-visits', methods=['GET', 'POST'])
+def blog_site_visits():
+    """Read or record entries shared by the blog and personal homepage."""
+    if request.method == 'GET':
+        response = u.format_dict({
+            'success': True,
+            'visits': blog_analytics.get_site_visits(),
+        })
+        response.headers['Cache-Control'] = 'public, max-age=30'
+        return response
+
+    visit_id = str(request.headers.get('X-Visit-ID') or '').strip()
+    source = str(request.headers.get('X-Site-Source') or '').strip().lower()
+    if not SITE_VISIT_ID_RE.fullmatch(visit_id):
+        return reterr(code='bad request', message='invalid site visit id')
+    if source not in {'blog', 'home'}:
+        return reterr(code='bad request', message='invalid site source')
+
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    visit_hash = hashlib.sha256(
+        f'{salt}|site-visit|{source}|{visit_id}'.encode('utf-8')
+    ).hexdigest()
+    visits, counted = blog_analytics.record_site_visit(visit_hash, source)
+    response = u.format_dict({
+        'success': True,
+        'visits': visits,
+        'counted': counted,
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+# === 博客互动（点赞与评论） ===
+
+
+def community_avatar_svg(email):
+    """Create a deterministic local fallback avatar without exposing the email."""
+    digest = hashlib.sha256(str(email).encode('utf-8')).hexdigest()
+    color_a = f'#{digest[0:6]}'
+    color_b = f'#{digest[6:12]}'
+    color_c = f'#{digest[12:18]}'
+    x = 18 + int(digest[18:20], 16) % 60
+    y = 18 + int(digest[20:22], 16) % 60
+    radius = 12 + int(digest[22:24], 16) % 18
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96">'
+        f'<rect width="96" height="96" rx="22" fill="{color_a}"/>'
+        f'<path d="M0 72 Q30 42 58 66 T96 42 V96 H0Z" fill="{color_b}" opacity=".82"/>'
+        f'<circle cx="{x}" cy="{y}" r="{radius}" fill="{color_c}" opacity=".9"/>'
+        '<path d="M14 18h22M60 78h22" stroke="white" stroke-opacity=".52" stroke-width="4" stroke-linecap="round"/>'
+        '</svg>'
+    )
+    return svg
+
+
+def community_qq_number(email):
+    """Return a QQ number only for numeric QQ-family mailbox addresses."""
+    normalized = str(email or '').strip().casefold()
+    match = re.fullmatch(
+        r'(?P<uin>[0-9]{5,12})@(?:qq\.com|foxmail\.com|vip\.qq\.com)',
+        normalized,
+    )
+    return match.group('uin') if match else None
+
+
+def community_gravatar_url(email):
+    """Build a Gravatar URL from the private, normalized email value."""
+    normalized = str(email or '').strip().casefold()
+    email_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    return f'https://www.gravatar.com/avatar/{email_hash}?s=96&d=404'
+
+
+def community_qq_avatar_url(qq_number):
+    """Build the primary QQ avatar URL from a validated numeric UIN."""
+    return f'https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=640'
+
+
+@app.route('/blog/community/avatar/<int:comment_id>')
+def blog_community_avatar(comment_id):
+    """Try QQ avatars first, then Gravatar, then a private local SVG fallback."""
+    avatar = community_store.get_comment_avatar(comment_id)
+    if avatar is None:
+        return reterr(code='not found', message='avatar not found'), 404
+
+    fallback = request.args.get('fallback', '')
+    qq_number = community_qq_number(avatar['email'])
+    if fallback == '2':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+
+    if qq_number and fallback != '1':
+        response = redirect(community_qq_avatar_url(qq_number), code=302)
+    elif fallback == '1' and qq_number:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    elif fallback == '1':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+    else:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
+@app.route('/blog/community/likes', methods=['GET'])
+def blog_community_likes():
+    """Read like totals and the current anonymous visitor's state."""
+    raw_targets = request.args.getlist('targets')
+    if len(raw_targets) == 1 and ',' in raw_targets[0]:
+        raw_targets = raw_targets[0].split(',')
+    if len(raw_targets) > 100:
+        return reterr(code='bad request', message='at most 100 targets are allowed')
+    try:
+        targets = [normalize_like_target(value) for value in raw_targets]
+        likes = community_store.get_likes(targets, get_blog_visitor_hash(request))
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message)
+    except Exception:
+        return reterr(code='server error', message='failed to read likes')
+    response = u.format_dict({'success': True, 'likes': likes})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/likes/<path:target>', methods=['POST'])
+def toggle_blog_community_like(target):
+    """Toggle one contribution for the current anonymous visitor and target."""
+    try:
+        normalized = normalize_like_target(target)
+        ip_key, client_key = get_community_rate_limit_keys(request)
+        community_like_limiter.check(ip_key, client_key)
+        count, liked = community_store.toggle_like(
+            normalized,
+            get_blog_visitor_hash(request),
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message)
+    except CommunityRateLimitExceeded:
+        return reterr(code='rate limited', message='too many like changes')
+    except Exception:
+        return reterr(code='server error', message='failed to update like')
+    response = u.format_dict({
+        'success': True,
+        'target': normalized,
+        'count': count,
+        'liked': liked,
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/comments/<page>', methods=['GET', 'POST'])
+def blog_community_comments(page):
+    """List published comments or submit one AI-moderated comment/reply."""
+    try:
+        normalized_page = normalize_comment_page(page)
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message)
+
+    admin_requested = bool(
+        request.args.get('secret') or request.headers.get('X-Admin-Secret')
+    )
+    if admin_requested and not verify_admin_secret():
+        return reterr(code='not authorized', message='invalid admin secret'), 401
+
+    if request.method == 'GET':
+        try:
+            comments = community_store.list_public_comments(
+                normalized_page,
+                include_nonpublished=verify_admin_secret(),
+            )
+        except Exception:
+            return reterr(code='server error', message='failed to read comments')
+        response = u.format_dict({
+            'success': True,
+            'page': normalized_page,
+            'comments': comments,
+            'count': len(comments),
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    if request.content_length is not None and request.content_length > 8192:
+        return reterr(code='body too large', message='comment request exceeds 8192 bytes')
+    try:
+        payload = request.get_json(force=False, silent=False)
+        submission = validate_comment_payload(normalized_page, payload)
+        is_admin = verify_admin_secret()
+        actor_hash = get_community_actor_hash(submission.email)
+        parent_context = community_store.get_parent_context(
+            normalized_page,
+            submission.parent_id,
+        )
+        ip_key, client_key = get_community_rate_limit_keys(request)
+        community_comment_limiter.check(ip_key, client_key, actor_hash)
+        daily_limit = community_limit_from_env(
+            'SLEEPY_COMMENT_DAILY_LIMIT', 20, 200
+        )
+        community_store.reserve_comment_quota(
+            {
+                f'email:{actor_hash}',
+                f'ip:{ip_key}',
+                f'client:{client_key}',
+            },
+            daily_limit=daily_limit,
+        )
+        history = community_store.actor_history(actor_hash)
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message)
+    except CommunityRateLimitExceeded as exc:
+        message = (
+            'daily comment limit reached'
+            if str(exc) == 'daily_limit'
+            else 'too many comments in a short time'
+        )
+        return reterr(code='rate limited', message=message)
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid comment object')
+
+    moderation = (
+        ModerationResult('allow', 'admin', 'administrator comment')
+        if is_admin
+        else comment_moderator.moderate(
+            page=normalized_page,
+            nickname=submission.nickname,
+            content=submission.content,
+            reply_to_name=parent_context['nickname'] if parent_context else '',
+            history=history,
+        )
+    )
+    status = {
+        'allow': 'published',
+        'reject': 'rejected',
+        'review': 'pending',
+    }[moderation.decision]
+    try:
+        comment = community_store.create_comment(
+            submission,
+            actor_hash,
+            status=status,
+            moderation_reason=f'{moderation.category}: {moderation.reason}',
+            parent_context=parent_context,
+            is_admin=is_admin,
+        )
+    except Exception:
+        return reterr(code='server error', message='failed to save comment')
+
+    if status == 'rejected':
+        return reterr(
+            code='comment rejected',
+            message='评论未通过内容审核，请避免广告、重复内容或无意义灌水',
+        )
+    response = u.format_dict({
+        'success': True,
+        'status': status,
+        'comment': comment if status == 'published' else None,
+        'message': (
+            '评论已发布'
+            if status == 'published'
+            else '评论已提交，等待人工确认'
+        ),
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/comments/<int:comment_id>', methods=['PATCH', 'DELETE'])
+def manage_blog_community_comment(comment_id):
+    """Moderate or soft-delete a comment using the existing admin secret."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    if request.method == 'PATCH':
+        try:
+            payload = request.get_json(force=False, silent=False)
+            if not isinstance(payload, dict):
+                raise CommunityValidationError(
+                    'invalid_body', 'expected a JSON object'
+                )
+            status = str(payload.get('status') or '').strip().lower()
+            reason = str(payload.get('moderation_reason') or '').strip()
+            updated = community_store.update_comment_status(
+                comment_id,
+                status,
+                reason,
+            )
+        except CommunityValidationError as exc:
+            return reterr(code=exc.code, message=exc.message), 400
+        except (TypeError, ValueError):
+            return reterr(code='bad request', message='comment id is invalid'), 400
+        except Exception:
+            return reterr(code='invalid JSON', message='expected a valid moderation update'), 400
+        if not updated:
+            return reterr(code='not found', message='comment not found'), 404
+        response = u.format_dict({
+            'success': True,
+            'comment_id': comment_id,
+            'status': status,
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    try:
+        deleted = community_store.delete_comment(comment_id)
+    except (TypeError, ValueError):
+        return reterr(code='bad request', message='comment id is invalid'), 400
+    except Exception:
+        return reterr(code='server error', message='failed to delete comment'), 500
+    if not deleted:
+        return reterr(code='not found', message='comment not found'), 404
+    response = u.format_dict({'success': True, 'deleted': deleted})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/friend-applications', methods=['GET', 'POST'])
+def blog_friend_applications():
+    """Submit a pending friend-link application or list applications for admins."""
+    if request.method == 'GET':
+        auth_err = require_admin()
+        if auth_err:
+            return auth_err, 401
+        status = request.args.get('status') or None
+        try:
+            applications = community_store.list_friend_applications(status=status)
+        except CommunityValidationError as exc:
+            return reterr(code=exc.code, message=exc.message), 400
+        response = u.format_dict({'success': True, 'applications': applications})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    if request.content_length is not None and request.content_length > 12288:
+        return reterr(code='body too large', message='application request exceeds 12288 bytes'), 413
+    try:
+        payload = request.get_json(force=False, silent=False)
+        submission = validate_friend_application_payload(payload)
+        ip_key, client_key = get_community_rate_limit_keys(request)
+        friend_application_limiter.check(ip_key, client_key)
+        application = community_store.create_friend_application(
+            submission,
+            get_blog_visitor_hash(request),
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except CommunityRateLimitExceeded:
+        return reterr(code='rate limited', message='friend-link application limit reached'), 429
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid friend-link application'), 400
+    response = u.format_dict({
+        'success': True,
+        'status': application['status'],
+        'message': '友链申请已提交，等待审核',
+    })
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 201
+
+
+@app.route('/blog/community/friend-applications/<int:application_id>', methods=['POST'])
+def update_blog_friend_application(application_id):
+    """Approve or reject a friend-link application for the future management site."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict):
+            raise CommunityValidationError('invalid_body', 'expected a JSON object')
+        status = str(payload.get('status') or '').strip().lower()
+        note = str(payload.get('moderation_note') or '').strip()
+        updated = community_store.update_friend_application(application_id, status, note)
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid application update'), 400
+    if not updated:
+        return reterr(code='not found', message='friend-link application not found'), 404
+    response = u.format_dict({'success': True, 'status': status})
     response.headers['Cache-Control'] = 'no-store'
     return response
 

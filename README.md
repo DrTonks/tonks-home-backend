@@ -1,14 +1,37 @@
 # Personal Status Server
 
-## 文章浏览量
+## 文章浏览量与站点访问量
 
 文章浏览量存放在独立的 `analytics.sqlite3` 中，首次访问统计接口时自动创建，
 不会对 `data.json` 做高频整文件写入。同一匿名访客、同一文章在 30 分钟内只计一次。
+博客与个人主页还通过 `/blog/site-visits` 共用一个站点访问总数，并按前端页面会话去重。
 
 - `SLEEPY_ANALYTICS_DB`：可选，覆盖 SQLite 文件路径。
 - `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `SLEEPY_ADMIN_SECRET`。
 - `SLEEPY_CORS_ORIGINS`：可选，逗号分隔的允许来源；同源反向代理部署无需配置。
 - `SLEEPY_RECOMMENDATIONS_DB`：可选，推荐收件箱和普通访客每日额度的 SQLite 路径。未配置时自动使用程序目录下的 `recommendations.sqlite3`；普通物理机部署且代码目录持久、可写时无需额外配置。仅在容器临时文件系统、多实例或数据与代码分离部署时建议显式指向持久卷。
+
+## 博客点赞与评论
+
+博客互动数据使用独立的 `community.sqlite3`，不会写入静态博客文件：
+
+- 点赞目标仅允许关于本站、友链和合法文章 slug；同一匿名客户端对同一目标最多贡献一个当前点赞，再次点击可取消。
+- 评论只允许 `about` 和 `friends`，支持回复。昵称、邮箱和内容必填，网站可选；邮箱当前只做格式校验，不代表已验证身份。管理员可使用已有 `SLEEPY_ADMIN_SECRET` 发布带“站长”标识的评论并软删除评论及回复。
+- 公开 API 永不返回邮箱或内部身份哈希。原始邮箱仅保存在服务端 SQLite 中，供头像代理、后续管理端联系和审核历史使用；备份和迁移该数据库时应按含个人信息的数据处理。
+- `/blog/community/avatar/<comment_id>` 会优先代理到 Gravatar 兼容头像；没有远程头像时，客户端自动请求 `?fallback=1`，由服务端返回不含个人信息的稳定 SVG 头像。
+- 友链申请写入 `friend_link_applications`，状态初始为 `pending`，不会自动修改博客静态 `public/data/friends.json`；管理员管理接口可供外部管理站接入。
+- 评论审核使用独立的 `comment_moderation_prompt.md`，不会载入桌宠 persona。模型输入包含同一标准化邮箱哈希对应的历史发言，但不包含邮箱地址。
+- 明确广告或灌水会被拒绝；不确定或模型不可用的评论保存为 `pending` 且不公开，待后续管理端处理。
+- 邮箱、客户端与 IP 哈希共同受短时/每日防刷限制；服务端不保存原始 IP。
+
+相关配置：
+
+- `SLEEPY_COMMUNITY_DB`：可选，覆盖互动 SQLite 路径。
+- `SLEEPY_COMMENT_MINUTE_LIMIT`：单一身份维度每分钟评论次数，默认 3。
+- `SLEEPY_COMMENT_DAILY_LIMIT`：邮箱、客户端和 IP 哈希任一维度的每日评论次数，默认 20。
+- `SLEEPY_LIKE_MINUTE_LIMIT`：单一身份维度每分钟点赞切换次数，默认 30。
+- `SLEEPY_COMMENT_HISTORY_CHARS`：发送给审核模型的历史字符预算，默认 12000；超出后较早记录改为状态计数，近期原文仍会保留。
+- `SLEEPY_FRIEND_APPLICATION_MINUTE_LIMIT`：单一身份维度每分钟友链申请次数，默认 2。
 
 完整回归测试：
 
@@ -112,6 +135,7 @@ python upload_agent_stats.py --server https://status.example.com --secret YOUR_A
 
 - `data.json`：运行时状态、个人日历、音乐和待办等动态数据。
 - `recommendations.sqlite3` 及其 `-wal`、`-shm` 文件：推荐内容及匿名每日额度；迁移时应停服后整体备份，容器部署需挂载持久卷。
+- `community.sqlite3` 及其 `-wal`、`-shm` 文件：点赞、评论、邮箱及匿名额度；迁移时应停服后整体备份并限制文件访问权限。
 - `.env`：服务端密钥、GitHub token、AI 密钥与静态运行配置。
 - `local.env.bat` 与 `.env*`：本地地址和密钥。
 - `部署指南.md`、本地诊断日志与上传的 `music/` 文件。

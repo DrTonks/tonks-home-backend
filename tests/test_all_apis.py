@@ -158,6 +158,18 @@ class AllApiRoutesTest(unittest.TestCase):
             ("GET", "/blog-posts"),
             ("GET", "/blog/views"),
             ("POST", "/blog/views/<path:slug>"),
+            ("GET", "/blog/site-visits"),
+            ("POST", "/blog/site-visits"),
+            ("GET", "/blog/community/likes"),
+            ("POST", "/blog/community/likes/<path:target>"),
+            ("GET", "/blog/community/comments/<page>"),
+            ("POST", "/blog/community/comments/<page>"),
+            ("PATCH", "/blog/community/comments/<int:comment_id>"),
+            ("DELETE", "/blog/community/comments/<int:comment_id>"),
+            ("GET", "/blog/community/avatar/<int:comment_id>"),
+            ("GET", "/blog/community/friend-applications"),
+            ("POST", "/blog/community/friend-applications"),
+            ("POST", "/blog/community/friend-applications/<int:application_id>"),
             ("GET", "/images/<path:filename>"),
             ("GET", "/music/list"),
             ("GET", "/music/<path:filename>"),
@@ -707,6 +719,80 @@ class AllApiRoutesTest(unittest.TestCase):
         })
         invalid = self.json(self.client.get("/blog/views?slugs=../bad"))
         self.assertFalse(invalid["success"])
+
+        empty_visits = self.json(self.client.get("/blog/site-visits"))
+        self.assertEqual(empty_visits["visits"], 0)
+        first_visit = self.json(
+            self.client.post(
+                "/blog/site-visits",
+                headers={
+                    "X-Visit-ID": "blog-session-00000001",
+                    "X-Site-Source": "blog",
+                },
+            )
+        )
+        duplicate_visit = self.json(
+            self.client.post(
+                "/blog/site-visits",
+                headers={
+                    "X-Visit-ID": "blog-session-00000001",
+                    "X-Site-Source": "blog",
+                },
+            )
+        )
+        home_visit = self.json(
+            self.client.post(
+                "/blog/site-visits",
+                headers={
+                    "X-Visit-ID": "home-session-00000001",
+                    "X-Site-Source": "home",
+                },
+            )
+        )
+        self.assertEqual((first_visit["visits"], first_visit["counted"]), (1, True))
+        self.assertEqual(
+            (duplicate_visit["visits"], duplicate_visit["counted"]),
+            (1, False),
+        )
+        self.assertEqual((home_visit["visits"], home_visit["counted"]), (2, True))
+        self.assertEqual(self.json(self.client.get("/blog/site-visits"))["visits"], 2)
+
+        invalid_visit = self.json(
+            self.client.post(
+                "/blog/site-visits",
+                headers={"X-Visit-ID": "short", "X-Site-Source": "blog"},
+            )
+        )
+        self.assertFalse(invalid_visit["success"])
+
+    def test_blog_community_avatar_prefers_q1_and_keeps_fallbacks(self):
+        with mock.patch.object(
+            backend.community_store,
+            "get_comment_avatar",
+            return_value={"email": "3064517736@qq.com"},
+        ):
+            primary = self.client.get(
+                "/blog/community/avatar/8",
+                follow_redirects=False,
+            )
+            gravatar = self.client.get(
+                "/blog/community/avatar/8?fallback=1",
+                follow_redirects=False,
+            )
+            local = self.client.get(
+                "/blog/community/avatar/8?fallback=2",
+                follow_redirects=False,
+            )
+
+        self.assertEqual(primary.status_code, 302)
+        self.assertEqual(
+            primary.headers["Location"],
+            "https://q1.qlogo.cn/g?b=qq&nk=3064517736&s=640",
+        )
+        self.assertEqual(gravatar.status_code, 302)
+        self.assertIn("https://www.gravatar.com/avatar/", gravatar.headers["Location"])
+        self.assertEqual(local.status_code, 200)
+        self.assertEqual(local.mimetype, "image/svg+xml")
 
     def test_image_route(self):
         response = self.client.get("/images/projects/calculator.png")

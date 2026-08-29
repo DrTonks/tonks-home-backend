@@ -364,6 +364,41 @@ GET /blog/views?slugs=first-post&slugs=folder/second-post
 
 ---
 
+### GET `/blog/site-visits` — 读取博客与个人主页的总访问量
+
+返回 `blog.tonks.top` 与 `tonks.top` 共用的累计页面会话数：
+
+```json
+{
+  "success": true,
+  "visits": 1280
+}
+```
+
+### POST `/blog/site-visits` — 记录一次站点访问
+
+两个前端在页面会话首次进入时调用。请求头必须包含长度为 16–128 的
+`X-Visit-ID`，以及值为 `blog` 或 `home` 的 `X-Site-Source`。服务端只保存加盐哈希，
+同一个来源、同一个页面会话重复上报不会再次增长。
+
+```http
+POST /blog/site-visits
+X-Visit-ID: 5f4dcc3b5aa765d61d8327deb882cf99
+X-Site-Source: blog
+```
+
+```json
+{
+  "success": true,
+  "visits": 1281,
+  "counted": true
+}
+```
+
+站点访问量与文章浏览量共用 `analytics.sqlite3`，首次访问接口时自动创建所需表。
+
+---
+
 ### GET `/blog-posts` — 最新博客文章 + 精选项目/时间线
 
 从 blog.example.com 获取最新文章 (Atom/RSS)，同时附加最新的项目和时光机条目（按 `startDate` 降序排列，取最新一条）。
@@ -1452,6 +1487,112 @@ async deleteEvent(id) {
 
 ## 错误处理指南
 
+## 博客互动接口
+
+互动接口默认沿用 `/api` 反向代理；跨域部署时需在 `SLEEPY_CORS_ORIGINS` 中加入博客的精确 Origin。客户端应稳定发送 `X-Client-ID`。
+
+### 批量读取点赞
+
+```http
+GET /blog/community/likes?targets=page:about&targets=page:friends&targets=post:example
+X-Client-ID: <browser-generated-id>
+```
+
+```json
+{
+  "success": true,
+  "likes": {
+    "page:about": { "count": 12, "liked": true },
+    "page:friends": { "count": 8, "liked": false },
+    "post:example": { "count": 3, "liked": false }
+  }
+}
+```
+
+允许的目标为 `page:about`、`page:friends` 和 `post:<合法文章 slug>`。
+
+### 切换点赞
+
+```http
+POST /blog/community/likes/page:about
+X-Client-ID: <browser-generated-id>
+```
+
+再次提交同一目标会取消当前匿名客户端的点赞。
+
+### 获取公开评论
+
+```http
+GET /blog/community/comments/about
+```
+
+页面参数仅允许 `about` 或 `friends`。响应只包含 `published` 评论，不包含邮箱、内部身份哈希和审核原因；每条评论会带 `is_admin` 以显示站长标记。`root_id` 用于两层展示；对回复继续回复时仍归入同一个根评论。带有效 `X-Admin-Secret` 或 `?secret=` 时，管理员可读取 `pending/rejected` 评论和审核原因。
+
+### 提交评论或回复
+
+```http
+POST /blog/community/comments/friends
+Content-Type: application/json
+X-Client-ID: <browser-generated-id>
+
+{
+  "parent_id": 12,
+  "nickname": "Visitor",
+  "email": "visitor@example.com",
+  "website": "https://example.com/",
+  "content": "谢谢你的回复。"
+}
+```
+
+- `parent_id` 可省略，填写时必须指向同一页面内已经公开的评论。
+- `nickname` 最长 30 字符，`content` 最长 800 字符，`website` 只允许 HTTP/HTTPS。
+- 邮箱必填并做基本格式校验，但当前不发送验证码；邮箱永不进入公开响应或大模型输入。
+- 审核通过时返回 `status: published` 和公开评论；不确定或模型不可用时返回 `status: pending`；明确广告/灌水返回业务错误 `comment rejected`。
+- 管理员请求应带 `X-Admin-Secret: <SLEEPY_ADMIN_SECRET>`；管理员评论跳过模型审核、直接发布并带 `is_admin: true`。
+
+### 评论头像
+
+```http
+GET /blog/community/avatar/<comment_id>
+```
+
+头像接口只接受已公开评论 ID。默认响应为 Gravatar 兼容头像的 302 跳转；远程头像不可用时请求 `?fallback=1` 获得服务端生成的 SVG。邮箱不会出现在响应 JSON 或 URL 路径中。
+
+### 管理员删除评论
+
+```http
+DELETE /blog/community/comments/12
+X-Admin-Secret: <SLEEPY_ADMIN_SECRET>
+```
+
+删除为软删除，并会连带删除该评论的回复。
+
+### 友链申请
+
+```http
+POST /blog/community/friend-applications
+Content-Type: application/json
+X-Client-ID: <browser-generated-id>
+
+{
+  "name": "Example",
+  "website": "https://example.com/",
+  "avatar": "https://example.com/avatar.png",
+  "description": "一个认真更新的小站",
+  "email": "owner@example.com"
+}
+```
+
+申请默认保存为 `pending`，不会直接加入博客静态友链墙。管理员可使用 `GET /blog/community/friend-applications?secret=...` 查看，并用 `POST /blog/community/friend-applications/<id>?secret=...` 更新 `status` 为 `approved` 或 `rejected`。
+
+### 当前管理边界
+
+博客页面提供轻量管理员模式用于站长发言和软删除；审核批准/拒绝仍建议在外部管理网站完成。管理员密钥沿用现有 `SLEEPY_ADMIN_SECRET`，博客不创建独立账户体系。
+
+---
+
+## 错误处理指南
+
 ### 统一错误格式
 
 ```json
@@ -1466,7 +1607,7 @@ async deleteEvent(id) {
 
 | code | HTTP Status | 说明 | 处理建议 |
 |------|-------------|------|----------|
-| `not authorized` | 200 | 密钥错误或缺失 | 检查 `?secret=` 参数 |
+| `not authorized` | 401（部分旧管理接口仍为 200） | 密钥错误或缺失 | 检查 `?secret=` 参数或 `X-Admin-Secret` |
 | `bad request` | 200 | 请求参数不合法 | 检查请求体和参数格式 |
 | `not found` | 200 | 资源不存在 | 正常业务逻辑，提示用户 |
 | `server error` | 200 | 服务器内部错误 | 显示通用错误提示，联系管理员 |
