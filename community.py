@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -28,6 +29,13 @@ EMAIL_RE = re.compile(
     re.IGNORECASE,
 )
 BLOG_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+
+
+def public_author_key(actor_hash: str) -> str:
+    """Return a stable public member key without exposing the internal actor hash."""
+    return hashlib.sha256(
+        f"community-public-author|{actor_hash}".encode("utf-8")
+    ).hexdigest()[:20]
 
 
 class CommunityValidationError(ValueError):
@@ -504,6 +512,7 @@ class CommunityStore:
             "content": submission.content,
             "status": status,
             "is_admin": bool(is_admin),
+            "author_key": public_author_key(actor_hash),
             "created_at": created_at,
             "reply_to_name": parent_context["nickname"] if parent_context else "",
         }
@@ -520,7 +529,8 @@ class CommunityStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT c.id, c.page, c.parent_id, c.root_id, c.nickname, c.email, c.website,
+                SELECT c.id, c.page, c.parent_id, c.root_id, c.actor_hash,
+                       c.nickname, c.email, c.website,
                        c.content, c.status, c.is_admin, c.created_at,
                        c.moderation_reason, parent.nickname AS reply_to_name
                 FROM community_comments AS c
@@ -544,6 +554,7 @@ class CommunityStore:
                 "content": str(row["content"]),
                 "status": str(row["status"]),
                 "is_admin": bool(row["is_admin"]),
+                "author_key": public_author_key(str(row["actor_hash"])),
                 "created_at": str(row["created_at"]),
                 "reply_to_name": str(row["reply_to_name"] or ""),
             }

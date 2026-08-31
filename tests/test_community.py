@@ -112,6 +112,9 @@ class CommunityStoreTests(unittest.TestCase):
         self.assertEqual(comments[1]["reply_to_name"], "Tonks")
         self.assertNotIn("email", json.dumps(comments))
         self.assertNotIn("actor_hash", json.dumps(comments))
+        self.assertEqual(comments[0]["author_key"], root["author_key"])
+        self.assertNotEqual(comments[0]["author_key"], comments[1]["author_key"])
+        self.assertEqual(len(comments[0]["author_key"]), 20)
 
     def test_history_includes_rejected_attempts_for_future_moderation(self):
         self.store.create_comment(
@@ -294,9 +297,13 @@ class CommunityRouteTests(unittest.TestCase):
             },
         ).get_json()
         self.assertEqual(created["status"], "published")
+        self.assertEqual(len(created["comment"]["author_key"]), 20)
         listed = self.client.get("/blog/community/comments/about").get_json()
         self.assertEqual(listed["count"], 1)
         self.assertNotIn("email", json.dumps(listed))
+        self.assertEqual(
+            listed["comments"][0]["author_key"], created["comment"]["author_key"]
+        )
 
     def test_invalid_email_is_rejected_before_moderation(self):
         response = self.client.post(

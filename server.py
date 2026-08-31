@@ -1472,6 +1472,33 @@ def community_qq_avatar_url(qq_number):
     return f'https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=640'
 
 
+@app.route('/blog/community/avatar-preview', methods=['POST'])
+def blog_community_avatar_preview():
+    """Resolve an avatar for a visitor identity without storing or returning its email."""
+    if request.content_length is not None and request.content_length > 2048:
+        return reterr(code='body too large', message='avatar request exceeds 2048 bytes')
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict):
+            raise CommunityValidationError('invalid_payload', 'request body must be an object')
+        email = normalize_email(payload.get('email'))
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except Exception:
+        return reterr(code='bad request', message='invalid JSON body'), 400
+
+    qq_number = community_qq_number(email)
+    if qq_number:
+        avatar_url = community_qq_avatar_url(qq_number)
+    else:
+        normalized = email.strip().casefold()
+        email_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
+        avatar_url = f'https://www.gravatar.com/avatar/{email_hash}?s=96&d=identicon'
+    response = u.format_dict({'success': True, 'avatar_url': avatar_url})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/blog/community/avatar/<int:comment_id>')
 def blog_community_avatar(comment_id):
     """Try QQ avatars first, then Gravatar, then a private local SVG fallback."""

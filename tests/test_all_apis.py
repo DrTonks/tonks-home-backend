@@ -166,6 +166,7 @@ class AllApiRoutesTest(unittest.TestCase):
             ("POST", "/blog/community/comments/<page>"),
             ("PATCH", "/blog/community/comments/<int:comment_id>"),
             ("DELETE", "/blog/community/comments/<int:comment_id>"),
+            ("POST", "/blog/community/avatar-preview"),
             ("GET", "/blog/community/avatar/<int:comment_id>"),
             ("GET", "/blog/community/friend-applications"),
             ("POST", "/blog/community/friend-applications"),
@@ -793,6 +794,34 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertIn("https://www.gravatar.com/avatar/", gravatar.headers["Location"])
         self.assertEqual(local.status_code, 200)
         self.assertEqual(local.mimetype, "image/svg+xml")
+
+    def test_blog_community_avatar_preview_uses_private_email_derivation(self):
+        qq = self.json(
+            self.client.post(
+                "/blog/community/avatar-preview",
+                json={"email": "3064517736@qq.com"},
+            )
+        )
+        gravatar = self.json(
+            self.client.post(
+                "/blog/community/avatar-preview",
+                json={"email": "visitor@example.com"},
+            )
+        )
+        invalid = self.client.post(
+            "/blog/community/avatar-preview",
+            json={"email": "not-an-email"},
+        )
+
+        self.assertTrue(qq["success"])
+        self.assertEqual(
+            qq["avatar_url"],
+            "https://q1.qlogo.cn/g?b=qq&nk=3064517736&s=640",
+        )
+        self.assertTrue(gravatar["success"])
+        self.assertIn("https://www.gravatar.com/avatar/", gravatar["avatar_url"])
+        self.assertNotIn("visitor@example.com", gravatar["avatar_url"])
+        self.assertEqual(invalid.status_code, 400)
 
     def test_image_route(self):
         response = self.client.get("/images/projects/calculator.png")
