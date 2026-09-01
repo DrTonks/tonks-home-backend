@@ -8,9 +8,9 @@
 | 数据格式 | JSON (Content-Type: application/json) |
 | 字符编码 | UTF-8 |
 
-服务启动时自动读取与 `server.py` 同目录的 `.env`，进程环境变量优先于文件值。敏感配置包括 `SLEEPY_STATUS_SECRET`、`SLEEPY_ADMIN_SECRET`、`SLEEPY_GITHUB_TOKEN`、`SLEEPY_AI_API_KEY`；`data.json` 只保留运行时业务数据。若旧 `data.json` 仍有对应密钥，只有在 `.env` 已提供非空替代值时才会自动移除旧副本。
+服务启动时自动读取与 `server.py` 同目录的 `.env`，进程环境变量优先于文件值。敏感配置包括 `SLEEPY_STATUS_SECRET`、`SLEEPY_ADMIN_SECRET`、`SLEEPY_GITHUB_TOKEN`、`SLEEPY_AI_API_KEY`、`SLEEPY_SENIVERSE_API_KEY`；`data.json` 只保留运行时业务数据。若旧 `data.json` 仍有对应密钥，只有在 `.env` 已提供非空替代值时才会自动移除旧副本。
 
-`SLEEPY_TRUSTED_PROXY` 默认是 `127.0.0.1`，表示只信任同机 Apache 传入的代理地址头；不要配置为任意来源。公网直连 9010 时提交的伪造 `X-Forwarded-For` 会被 Waitress 清除。
+`SLEEPY_TRUSTED_PROXY` 默认是 `127.0.0.1`，表示只信任同机 Apache 传入的代理地址头；`SLEEPY_TRUSTED_PROXY_COUNT` 默认是 `1`，对应唯一一层 Apache。不要将可信代理配置为任意来源。公网直连 9010 时提交的伪造 `X-Forwarded-For` 会被 Waitress 清除；应用层不再二次解析代理头。
 
 ## 认证体系
 
@@ -38,6 +38,7 @@
 |------|------|------|------|
 | GET | `/` | 无 | 服务健康信息 |
 | GET | `/geoip` | 无 | 获取当前访客的粗略城市与经纬度（不返回或保存 IP） |
+| GET | `/weather` | 无 | 获取当前访客所在城市的实况与明日天气（不返回 IP 或 API Key） |
 | GET | `/query` | 无 | PC 当前状态 |
 | GET | `/get/status_list` | 无 | 全部状态定义 |
 | GET | `/online_count` | 无 | 在线人数统计 |
@@ -63,6 +64,38 @@
 ---
 
 ## 公开接口
+
+### GET `/weather` — 获取访客城市与天气
+
+服务端只信任受配置保护的反向代理地址头，取得访客公网 IP 后，将该 IP 作为心知天气 `location` 的明确值查询；不会使用 `location=ip`，因此心知识别的是访客而不是服务器出口。原始 IP 和心知私钥均不会出现在响应、数据库或应用缓存中。
+
+**成功响应**：
+
+```json
+{
+  "success": true,
+  "location": {
+    "id": "WT7W3R63DQMH",
+    "city": "福州",
+    "region": "福建",
+    "country": "CN",
+    "path": "福州,福建,中国",
+    "timezone": "Asia/Shanghai"
+  },
+  "now": { "text": "多云", "code": 4, "temperature": 28 },
+  "tomorrow": {
+    "date": "2026-09-01",
+    "text": "阵雨",
+    "code": 10,
+    "low": 25,
+    "high": 32
+  },
+  "cached_at": "2026-08-31T00:00:00+00:00",
+  "stale": false
+}
+```
+
+服务端使用加盐 IP 哈希缓存完整结果：新鲜期 1 小时，最长故障兜底期 6 小时。心知短暂不可用或触发限流时，如有可用旧缓存则返回 HTTP 200 且 `stale: true`；无缓存时分别返回 HTTP 429、502 或未配置密钥时的 503。所有响应均携带 `Cache-Control: private, no-store`，前端可自行进行私有本地缓存。
 
 ### GET `/geoip` — 获取访客粗略位置
 
@@ -1583,7 +1616,22 @@ X-Client-ID: <browser-generated-id>
 }
 ```
 
-申请默认保存为 `pending`，不会直接加入博客静态友链墙。管理员可使用 `GET /blog/community/friend-applications?secret=...` 查看，并用 `POST /blog/community/friend-applications/<id>?secret=...` 更新 `status` 为 `approved` 或 `rejected`。
+申请默认保存为 `pending`，不会直接加入博客静态友链墙。成功响应会额外返回一次性的 `tracking_token` 与脱敏 `application`；客户端应妥善保存 token，服务端数据库只保存其加盐摘要。
+
+访客可用自己的 token 查询申请状态：
+
+```http
+POST /blog/community/friend-applications/status
+Content-Type: application/json
+
+{
+  "tokens": ["<tracking_token>"]
+}
+```
+
+单次最多查询 20 枚 token，响应只包含命中的脱敏申请（不含邮箱），并返回最新 `pending`、`approved` 或 `rejected` 状态及审核备注。不要把 token 放入 URL、公开日志或分享给他人；未验证邮箱不能用于找回申请。
+
+管理员可使用 `GET /blog/community/friend-applications?secret=...` 查看完整资料，并用 `POST /blog/community/friend-applications/<id>?secret=...` 更新 `status` 为 `approved` 或 `rejected`。
 
 ### 当前管理边界
 

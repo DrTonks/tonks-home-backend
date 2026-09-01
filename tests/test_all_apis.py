@@ -46,6 +46,8 @@ TEST_CONFIG = {
 workspace = None
 backend = None
 original_cwd = None
+VISITOR_IP = "110.80.172.21"
+VISITOR_ENV = {"REMOTE_ADDR": VISITOR_IP}
 
 
 def setUpModule():
@@ -65,12 +67,14 @@ def setUpModule():
     os.environ["SLEEPY_ANALYTICS_DB"] = str(root / "analytics.sqlite3")
     os.environ["SLEEPY_AGENT_ACTIVITY_DB"] = str(root / "agent_activity.sqlite3")
     os.environ["SLEEPY_RECOMMENDATIONS_DB"] = str(root / "recommendations.sqlite3")
+    os.environ["SLEEPY_COMMUNITY_DB"] = str(root / "community.sqlite3")
     os.environ["SLEEPY_ANALYTICS_SALT"] = "analytics-test-salt"
     os.environ["SLEEPY_CORS_ORIGINS"] = "http://127.0.0.1:4321"
     os.environ["SLEEPY_ENV_FILE"] = str(root / "missing-test.env")
     os.environ["SLEEPY_STATUS_SECRET"] = TEST_CONFIG["secret"]
     os.environ["SLEEPY_ADMIN_SECRET"] = TEST_CONFIG["admin_secret"]
     os.environ["SLEEPY_GITHUB_TOKEN"] = TEST_CONFIG["github_token"]
+    os.environ["SLEEPY_SENIVERSE_API_KEY"] = "weather-test-key"
     os.chdir(root)
     sys.path.insert(0, str(REPO_DIR))
     import server as imported_backend
@@ -86,12 +90,14 @@ def tearDownModule():
         "SLEEPY_ANALYTICS_DB",
         "SLEEPY_AGENT_ACTIVITY_DB",
         "SLEEPY_RECOMMENDATIONS_DB",
+        "SLEEPY_COMMUNITY_DB",
         "SLEEPY_ANALYTICS_SALT",
         "SLEEPY_CORS_ORIGINS",
         "SLEEPY_ENV_FILE",
         "SLEEPY_STATUS_SECRET",
         "SLEEPY_ADMIN_SECRET",
         "SLEEPY_GITHUB_TOKEN",
+        "SLEEPY_SENIVERSE_API_KEY",
     ):
         os.environ.pop(name, None)
     if str(REPO_DIR) in sys.path:
@@ -121,6 +127,9 @@ class AllApiRoutesTest(unittest.TestCase):
             path = root / f"recommendations.sqlite3{suffix}"
             if path.exists():
                 path.unlink()
+            path = root / f"community.sqlite3{suffix}"
+            if path.exists():
+                path.unlink()
         for path in (root / "music").iterdir():
             path.unlink()
         backend.d.load()
@@ -134,10 +143,17 @@ class AllApiRoutesTest(unittest.TestCase):
             str(root / "recommendations.sqlite3")
         )
         backend.recommendation_limiter = backend.RecommendationRateLimiter(100, 100)
+        backend.community_store = backend.CommunityStore(
+            str(root / "community.sqlite3")
+        )
+        backend.friend_application_limiter = backend.CommunityBurstLimiter(100)
         backend.online_users.clear()
         backend.geoip_cache.clear()
         backend.geoip_last_attempt.clear()
         backend.geoip_upstream_attempts.clear()
+        backend.weather_cache.clear()
+        backend.weather_last_attempt.clear()
+        backend.weather_upstream_attempts.clear()
         self.client = backend.app.test_client()
 
     def json(self, response):
@@ -149,6 +165,7 @@ class AllApiRoutesTest(unittest.TestCase):
         expected = {
             ("GET", "/"),
             ("GET", "/geoip"),
+            ("GET", "/weather"),
             ("GET", "/query"),
             ("GET", "/get/status_list"),
             ("GET", "/online_count"),
@@ -168,8 +185,18 @@ class AllApiRoutesTest(unittest.TestCase):
             ("DELETE", "/blog/community/comments/<int:comment_id>"),
             ("POST", "/blog/community/avatar-preview"),
             ("GET", "/blog/community/avatar/<int:comment_id>"),
+            ("GET", "/blog/community/feedback"),
+            ("POST", "/blog/community/feedback"),
+            ("GET", "/blog/community/feedback/avatar/<int:message_id>"),
+            ("GET", "/blog/community/feedback/room-avatar/<int:message_id>"),
+            ("POST", "/blog/community/feedback/messages"),
+            ("POST", "/blog/community/feedback/<int:topic_id>/messages"),
+            ("PATCH", "/blog/community/feedback/<int:topic_id>"),
+            ("POST", "/blog/community/feedback/from-comment"),
+            ("POST", "/blog/community/feedback/merge"),
             ("GET", "/blog/community/friend-applications"),
             ("POST", "/blog/community/friend-applications"),
+            ("POST", "/blog/community/friend-applications/status"),
             ("POST", "/blog/community/friend-applications/<int:application_id>"),
             ("GET", "/images/<path:filename>"),
             ("GET", "/music/list"),
@@ -201,6 +228,243 @@ class AllApiRoutesTest(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
+    def test_waitress_is_the_only_proxy_header_trust_boundary(self):
+        request = mock.MagicMock()
+        request.remote_addr = VISITOR_IP
+        request.headers = {"X-Forwarded-For": "8.8.8.8"}
+        request.environ = {
+            "werkzeug.proxy_fix.orig": {"REMOTE_ADDR": "8.8.8.8"},
+        }
+
+        self.assertEqual(backend.get_geoip_client_address(request), VISITOR_IP)
+        self.assertEqual(backend.get_request_key(request), f"ip:{VISITOR_IP}")
+
+    def test_waitress_proxy_settings_trust_exactly_one_local_proxy(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SLEEPY_TRUSTED_PROXY": "127.0.0.1",
+                "SLEEPY_TRUSTED_PROXY_COUNT": "1",
+            },
+        ):
+            settings = backend.get_waitress_proxy_settings()
+
+        self.assertEqual(settings["trusted_proxy"], "127.0.0.1")
+        self.assertEqual(settings["trusted_proxy_count"], 1)
+        self.assertEqual(
+            settings["trusted_proxy_headers"],
+            {"x-forwarded-for", "x-forwarded-proto"},
+        )
+        self.assertTrue(settings["clear_untrusted_proxy_headers"])
+
+    def test_waitress_proxy_settings_reject_invalid_proxy_count(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SLEEPY_TRUSTED_PROXY": "127.0.0.1",
+                "SLEEPY_TRUSTED_PROXY_COUNT": "0",
+            },
+        ):
+            with self.assertRaises(RuntimeError):
+                backend.get_waitress_proxy_settings()
+
+    def test_weather_uses_explicit_visitor_ip_and_caches_normalized_result(self):
+        upstream_result = {
+            "location": {
+                "id": "WT7W3R63DQMH",
+                "city": "福州",
+                "region": "福建",
+                "country": "CN",
+                "path": "福州,福建,中国",
+                "timezone": "Asia/Shanghai",
+            },
+            "now": {"text": "多云", "code": 4, "temperature": 28},
+            "tomorrow": {
+                "date": "2026-09-01",
+                "text": "阵雨",
+                "code": 10,
+                "low": 25,
+                "high": 32,
+            },
+            "cached_at": "2026-08-31T00:00:00+00:00",
+            "stale": False,
+        }
+        with mock.patch.object(
+            backend, "fetch_seniverse_weather", return_value=upstream_result
+        ) as lookup:
+            first = self.client.get(
+                "/weather", environ_overrides=VISITOR_ENV
+            )
+            second = self.client.get(
+                "/weather", environ_overrides=VISITOR_ENV
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.headers.get("Cache-Control"), "private, no-store")
+        self.assertEqual(first.get_json()["location"]["city"], "福州")
+        self.assertEqual(first.get_json()["tomorrow"]["text"], "阵雨")
+        self.assertNotIn("110.80.172.21", json.dumps(first.get_json()))
+        self.assertEqual(second.get_json(), first.get_json())
+        lookup.assert_called_once_with("110.80.172.21")
+
+    def test_weather_ignores_application_layer_forwarded_for_spoofing(self):
+        upstream_result = {
+            "location": {
+                "id": "WT7W3R63DQMH",
+                "city": "福州",
+                "region": "福建",
+                "country": "CN",
+                "path": "福州,福建,中国",
+                "timezone": "Asia/Shanghai",
+            },
+            "now": {"text": "晴", "code": 0, "temperature": 28},
+            "tomorrow": {
+                "date": "2026-09-01",
+                "text": "多云",
+                "code": 4,
+                "low": 25,
+                "high": 32,
+            },
+            "cached_at": "2026-08-31T00:00:00+00:00",
+            "stale": False,
+        }
+        with mock.patch.object(
+            backend, "fetch_seniverse_weather", return_value=upstream_result
+        ) as lookup:
+            response = self.client.get(
+                "/weather",
+                headers={"X-Forwarded-For": "8.8.8.8"},
+                environ_overrides=VISITOR_ENV,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        lookup.assert_called_once_with(VISITOR_IP)
+
+    def test_weather_returns_stale_cache_during_upstream_failure(self):
+        cached_result = {
+            "location": {
+                "id": "WT7W3R63DQMH",
+                "city": "福州",
+                "region": "福建",
+                "country": "CN",
+                "path": "福州,福建,中国",
+                "timezone": "Asia/Shanghai",
+            },
+            "now": {"text": "多云", "code": 4, "temperature": 28},
+            "tomorrow": {
+                "date": "2026-09-01",
+                "text": "阵雨",
+                "code": 10,
+                "low": 25,
+                "high": 32,
+            },
+            "cached_at": "2026-08-31T00:00:00+00:00",
+            "stale": False,
+        }
+        with mock.patch.object(
+            backend, "fetch_seniverse_weather", return_value=cached_result
+        ):
+            self.assertEqual(
+                self.client.get("/weather", environ_overrides=VISITOR_ENV).status_code,
+                200,
+            )
+
+        cache_entry = next(iter(backend.weather_cache.values()))
+        cache_entry["fresh_until"] = time.monotonic() - 1
+        for key in list(backend.weather_last_attempt):
+            backend.weather_last_attempt[key] = time.monotonic() - 60
+        with mock.patch.object(
+            backend,
+            "fetch_seniverse_weather",
+            side_effect=backend.WeatherUpstreamError("provider failed"),
+        ) as lookup:
+            stale = self.client.get("/weather", environ_overrides=VISITOR_ENV)
+
+        self.assertEqual(stale.status_code, 200)
+        self.assertTrue(stale.get_json()["stale"])
+        self.assertEqual(stale.get_json()["location"]["city"], "福州")
+        lookup.assert_called_once_with("110.80.172.21")
+
+    def test_weather_reports_missing_server_configuration_without_leaking_details(self):
+        with mock.patch.dict(os.environ, {"SLEEPY_SENIVERSE_API_KEY": ""}):
+            response = self.client.get(
+                "/weather", environ_overrides=VISITOR_ENV
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "weather not configured")
+        self.assertNotIn("key", response.get_json()["message"].lower())
+
+    def test_seniverse_request_uses_explicit_ip_instead_of_server_auto_detection(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "results": [{
+                "location": {"name": "福州"},
+                "now": {"text": "晴", "code": "0", "temperature": "26"},
+            }]
+        }).encode("utf-8")
+        with mock.patch.object(
+            backend.urllib.request, "urlopen", return_value=response
+        ) as urlopen:
+            backend.fetch_seniverse_json("now", "110.80.172.21")
+
+        requested_url = urlopen.call_args.args[0].full_url
+        self.assertIn("location=110.80.172.21", requested_url)
+        self.assertNotIn("location=ip", requested_url)
+
+    def test_seniverse_weather_normalizes_current_and_tomorrow_payloads(self):
+        now_payload = {
+            "results": [{
+                "location": {
+                    "id": "WT7W3R63DQMH",
+                    "name": "福州",
+                    "country": "CN",
+                    "path": "福州,福建,中国",
+                    "timezone": "Asia/Shanghai",
+                },
+                "now": {"text": "晴", "code": "0", "temperature": "26"},
+            }]
+        }
+        daily_payload = {
+            "results": [{
+                "daily": [
+                    {
+                        "date": "2026-08-31",
+                        "text_day": "晴",
+                        "code_day": "0",
+                        "low": "24",
+                        "high": "31",
+                    },
+                    {
+                        "date": "2026-09-01",
+                        "text_day": "多云",
+                        "code_day": "4",
+                        "low": "23",
+                        "high": "30",
+                    },
+                ]
+            }]
+        }
+        with mock.patch.object(
+            backend,
+            "fetch_seniverse_json",
+            side_effect=[now_payload, daily_payload],
+        ) as fetch:
+            result = backend.fetch_seniverse_weather("110.80.172.21")
+
+        self.assertEqual(result["location"]["city"], "福州")
+        self.assertEqual(result["location"]["region"], "福建")
+        self.assertEqual(result["now"], {
+            "text": "晴", "code": 0, "temperature": 26,
+        })
+        self.assertEqual(result["tomorrow"]["date"], "2026-09-01")
+        self.assertEqual(result["tomorrow"]["low"], 23)
+        self.assertFalse(result["stale"])
+        self.assertEqual(fetch.call_args_list, [
+            mock.call("now", "110.80.172.21"),
+            mock.call("daily", "110.80.172.21", {"start": 0, "days": 2}),
+        ])
+
     def test_health_device_status_and_online_routes(self):
         health = self.client.get(
             "/",
@@ -226,7 +490,7 @@ class AllApiRoutesTest(unittest.TestCase):
         ) as lookup:
             geoip = self.client.get(
                 "/geoip",
-                headers={"X-Forwarded-For": "110.80.172.21"},
+                environ_overrides=VISITOR_ENV,
             )
         self.assertEqual(geoip.status_code, 200)
         self.assertEqual(geoip.headers.get("Cache-Control"), "private, no-store")
@@ -237,7 +501,7 @@ class AllApiRoutesTest(unittest.TestCase):
         # 同一访客重复请求命中加盐哈希内存缓存，不再次消耗 ip-api 额度。
         cached_geoip = self.client.get(
             "/geoip",
-            headers={"X-Forwarded-For": "110.80.172.21"},
+            environ_overrides=VISITOR_ENV,
         )
         self.assertEqual(cached_geoip.status_code, 200)
         self.assertEqual(cached_geoip.get_json()["city"], "福州")
@@ -336,7 +600,7 @@ class AllApiRoutesTest(unittest.TestCase):
         ):
             upstream = self.client.get(
                 "/geoip",
-                headers={"X-Forwarded-For": "110.80.172.21"},
+                environ_overrides=VISITOR_ENV,
             )
         self.assertEqual(upstream.status_code, 502)
         self.assertEqual(upstream.get_json()["code"], "geoip upstream error")
@@ -349,7 +613,7 @@ class AllApiRoutesTest(unittest.TestCase):
         with mock.patch.object(backend, "fetch_ip_api_location") as lookup:
             limited = self.client.get(
                 "/geoip",
-                headers={"X-Forwarded-For": "110.80.172.21"},
+                environ_overrides=VISITOR_ENV,
             )
         self.assertEqual(limited.status_code, 429)
         self.assertEqual(limited.get_json()["code"], "geoip rate limited")
@@ -822,6 +1086,58 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertIn("https://www.gravatar.com/avatar/", gravatar["avatar_url"])
         self.assertNotIn("visitor@example.com", gravatar["avatar_url"])
         self.assertEqual(invalid.status_code, 400)
+
+    def test_friend_application_tracking_is_private_and_follows_moderation(self):
+        submitted_response = self.client.post(
+            "/blog/community/friend-applications",
+            headers={"X-Client-ID": "friend-applicant-a"},
+            json={
+                "name": "Example site",
+                "website": "https://example.com/",
+                "avatar": "https://example.com/avatar.png",
+                "description": "A small personal site",
+                "email": "owner@example.com",
+            },
+        )
+        self.assertEqual(submitted_response.status_code, 201)
+        submitted = submitted_response.get_json()
+        token = submitted["tracking_token"]
+        application_id = submitted["application"]["id"]
+        self.assertGreaterEqual(len(token), 32)
+        self.assertNotIn("email", submitted["application"])
+
+        own = self.json(
+            self.client.post(
+                "/blog/community/friend-applications/status",
+                json={"tokens": [token]},
+            )
+        )
+        self.assertEqual(own["applications"][0]["status"], "pending")
+        self.assertNotIn("email", own["applications"][0])
+        unknown = self.json(
+            self.client.post(
+                "/blog/community/friend-applications/status",
+                json={"tokens": ["x" * 43]},
+            )
+        )
+        self.assertEqual(unknown["applications"], [])
+
+        updated = self.json(
+            self.client.post(
+                f"/blog/community/friend-applications/{application_id}",
+                headers={"X-Admin-Secret": TEST_CONFIG["admin_secret"]},
+                json={"status": "approved", "moderation_note": "欢迎加入"},
+            )
+        )
+        self.assertEqual(updated["status"], "approved")
+        approved = self.json(
+            self.client.post(
+                "/blog/community/friend-applications/status",
+                json={"tokens": [token]},
+            )
+        )
+        self.assertEqual(approved["applications"][0]["status"], "approved")
+        self.assertEqual(approved["applications"][0]["moderation_note"], "欢迎加入")
 
     def test_image_route(self):
         response = self.client.get("/images/projects/calculator.png")

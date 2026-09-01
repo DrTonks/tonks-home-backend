@@ -9,6 +9,7 @@
 - `SLEEPY_ANALYTICS_DB`：可选，覆盖 SQLite 文件路径。
 - `SLEEPY_ANALYTICS_SALT`：可选，用于匿名访客哈希；未配置时回退到 `SLEEPY_ADMIN_SECRET`。
 - `SLEEPY_CORS_ORIGINS`：可选，逗号分隔的允许来源；同源反向代理部署无需配置。
+- `SLEEPY_SENIVERSE_API_KEY`：心知天气私钥，仅供服务端 `/weather` 使用；禁止放入前端 `VITE_` 环境变量。服务端以可信代理解析出的访客 IP 查询城市、实况和明日预报，并只缓存加盐 IP 哈希。
 - `SLEEPY_RECOMMENDATIONS_DB`：可选，推荐收件箱和普通访客每日额度的 SQLite 路径。未配置时自动使用程序目录下的 `recommendations.sqlite3`；普通物理机部署且代码目录持久、可写时无需额外配置。仅在容器临时文件系统、多实例或数据与代码分离部署时建议显式指向持久卷。
 
 ## 博客点赞与评论
@@ -19,7 +20,7 @@
 - 评论只允许 `about` 和 `friends`，支持回复。昵称、邮箱和内容必填，网站可选；邮箱当前只做格式校验，不代表已验证身份。管理员可使用已有 `SLEEPY_ADMIN_SECRET` 发布带“站长”标识的评论并软删除评论及回复。
 - 公开 API 永不返回邮箱或内部身份哈希。原始邮箱仅保存在服务端 SQLite 中，供头像代理、后续管理端联系和审核历史使用；备份和迁移该数据库时应按含个人信息的数据处理。
 - `/blog/community/avatar/<comment_id>` 会优先代理到 Gravatar 兼容头像；没有远程头像时，客户端自动请求 `?fallback=1`，由服务端返回不含个人信息的稳定 SVG 头像。
-- 友链申请写入 `friend_link_applications`，状态初始为 `pending`，不会自动修改博客静态 `public/data/friends.json`；管理员管理接口可供外部管理站接入。
+- 友链申请写入 `friend_link_applications`，状态初始为 `pending`，不会自动修改博客静态 `public/data/friends.json`；提交时返回一次性追踪 token，数据库只保存摘要，访客可凭 token 查询自己的审核结果，管理员管理接口可供外部管理站接入。
 - 评论审核使用独立的 `comment_moderation_prompt.md`，不会载入桌宠 persona。模型输入包含同一标准化邮箱哈希对应的历史发言，但不包含邮箱地址。
 - 明确广告或灌水会被拒绝；不确定或模型不可用的评论保存为 `pending` 且不公开，待后续管理端处理。
 - 邮箱、客户端与 IP 哈希共同受短时/每日防刷限制；服务端不保存原始 IP。
@@ -87,7 +88,7 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
    python server.py
    ```
 
-   服务启动时自动读取与 `server.py` 同目录的 `.env`，已存在的进程环境变量优先级更高。监听地址由 `SLEEPY_HOST`、`SLEEPY_PORT` 控制。生产环境建议由 Nginx/Caddy 反向代理并启用 HTTPS。
+   服务启动时自动读取与 `server.py` 同目录的 `.env`，已存在的进程环境变量优先级更高。监听地址由 `SLEEPY_HOST`、`SLEEPY_PORT` 控制。生产环境建议由 Apache/Nginx/Caddy 反向代理并启用 HTTPS。单层本机代理保持 `SLEEPY_TRUSTED_PROXY=127.0.0.1` 和 `SLEEPY_TRUSTED_PROXY_COUNT=1`；如增加 CDN 或代理层，必须按实际可信链调整。
 
 完整接口见 [API文档.md](API文档.md)。
 

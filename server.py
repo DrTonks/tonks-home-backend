@@ -9,7 +9,6 @@ import utils as u
 from datetime import datetime, timedelta, timezone
 from data import data as data_init
 from flask import Flask, Response, redirect, request, send_from_directory
-from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 import threading
 import time
@@ -23,6 +22,7 @@ import urllib.parse
 import hashlib
 import ipaddress
 import re
+import secrets
 from collections import deque
 from markupsafe import escape
 from analytics import BlogAnalytics, AgentActivityStore
@@ -47,6 +47,8 @@ from community import (
     normalize_email,
     normalize_like_target,
     validate_comment_payload,
+    validate_feedback_message_payload,
+    validate_feedback_topic_payload,
 )
 from comment_moderation import CommentModerationService, ModerationResult
 
@@ -78,8 +80,6 @@ friend_application_limiter = CommunityBurstLimiter(
 
 app = Flask(__name__, static_folder=None)
 app.register_blueprint(create_pet_ai_blueprint())
-# 如果前端通过反向代理（nginx）转发请求，请根据代理层数调整 x_for 值
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 
 @app.after_request
@@ -96,7 +96,7 @@ def add_configured_cors_headers(response):
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PATCH, DELETE, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = (
             'Content-Type, X-Client-ID, X-Visit-ID, X-Site-Source, '
-            'Authorization, X-Admin-Secret'
+            'Authorization, X-Admin-Secret, X-Community-Identity'
         )
         response.headers['Vary'] = 'Origin'
     return response
@@ -172,6 +172,18 @@ geoip_last_attempt = {}
 geoip_upstream_attempts = deque()
 geoip_runtime_salt = os.urandom(32).hex()
 
+# 天气结果按加盐访客 IP 哈希缓存在内存中。新鲜缓存用于正常响应，过期缓存仅在
+# 心知天气短暂不可用时降级返回，避免桌宠天气功能因一次上游故障完全消失。
+WEATHER_CACHE_TTL_SECONDS = 60 * 60
+WEATHER_CACHE_STALE_SECONDS = 6 * 60 * 60
+WEATHER_CACHE_MAX_ENTRIES = 4096
+WEATHER_VISITOR_RETRY_SECONDS = 10
+WEATHER_UPSTREAM_LIMIT_PER_MINUTE = 20
+weather_lock = threading.Lock()
+weather_cache = {}
+weather_last_attempt = {}
+weather_upstream_attempts = deque()
+
 BLOG_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
 SITE_VISIT_ID_RE = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
 
@@ -189,13 +201,7 @@ def reterr(code, message):
 
 
 def showip(req, msg):
-    ip1 = req.remote_addr
-    try:
-        ip2 = req.headers['X-Forwarded-For']
-        u.infon(f'- Request: {ip1} / {ip2} : {msg}')
-    except:
-        ip2 = None
-        u.infon(f'- Request: {ip1} : {msg}')
+    u.infon(f'- Request: {req.remote_addr} : {msg}')
 
 
 def get_request_key(req):
@@ -207,9 +213,6 @@ def get_request_key(req):
     cid = req.headers.get('X-Client-ID') or req.headers.get('X-Client-Id')
     if cid:
         return f'cid:{cid}'
-    xff = req.headers.get('X-Forwarded-For', '')
-    if xff:
-        return "ip:" + xff.split(',')[0].strip()
     return f'ip:{req.remote_addr}'
 
 
@@ -227,6 +230,20 @@ class GeoIpRateLimitExceeded(RuntimeError):
         self.retry_after = max(1, int(retry_after))
 
 
+class WeatherConfigError(RuntimeError):
+    pass
+
+
+class WeatherUpstreamError(RuntimeError):
+    pass
+
+
+class WeatherRateLimitExceeded(RuntimeError):
+    def __init__(self, message, retry_after=WEATHER_VISITOR_RETRY_SECONDS):
+        super().__init__(message)
+        self.retry_after = max(1, int(retry_after))
+
+
 def normalize_public_ip(client_ip):
     try:
         address = ipaddress.ip_address(str(client_ip or '').strip())
@@ -235,6 +252,196 @@ def normalize_public_ip(client_ip):
     if not address.is_global:
         raise GeoIpClientError('client IP is not public')
     return str(address)
+
+
+def _seniverse_api_key():
+    key = os.environ.get('SLEEPY_SENIVERSE_API_KEY', '').strip()
+    if not key:
+        raise WeatherConfigError('Seniverse API key is not configured')
+    return key
+
+
+def fetch_seniverse_json(endpoint, client_ip, extra_params=None):
+    """Fetch one Seniverse weather endpoint for an explicit visitor IP."""
+    location = normalize_public_ip(client_ip)
+    if endpoint not in {'now', 'daily'}:
+        raise ValueError('unsupported Seniverse weather endpoint')
+    params = {
+        'key': _seniverse_api_key(),
+        # Do not use location=ip here: that would resolve the backend server IP.
+        'location': location,
+        'language': 'zh-Hans',
+        'unit': 'c',
+    }
+    params.update(extra_params or {})
+    url = (
+        f'https://api.seniverse.com/v3/weather/{endpoint}.json?'
+        f'{urllib.parse.urlencode(params)}'
+    )
+    upstream_request = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'tonks-home-weather/2.0'},
+    )
+    try:
+        with urllib.request.urlopen(upstream_request, timeout=8) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise WeatherRateLimitExceeded(
+                'weather provider rate limited', retry_after=60
+            ) from exc
+        raise WeatherUpstreamError('weather provider HTTP error') from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise WeatherUpstreamError('weather provider is unavailable') from exc
+    if not isinstance(payload, dict) or not payload.get('results'):
+        raise WeatherUpstreamError('weather provider returned an invalid payload')
+    return payload
+
+
+def _required_int(value, field_name, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise WeatherUpstreamError(
+            f'weather provider returned invalid {field_name}'
+        ) from exc
+    if not minimum <= parsed <= maximum:
+        raise WeatherUpstreamError(
+            f'weather provider returned invalid {field_name}'
+        )
+    return parsed
+
+
+def fetch_seniverse_weather(client_ip):
+    """Return normalized current weather and tomorrow forecast for one visitor."""
+    location = normalize_public_ip(client_ip)
+    now_payload = fetch_seniverse_json('now', location)
+    daily_payload = fetch_seniverse_json(
+        'daily', location, {'start': 0, 'days': 2}
+    )
+    try:
+        now_result = now_payload['results'][0]
+        daily_result = daily_payload['results'][0]
+        location_data = now_result['location']
+        now_data = now_result['now']
+        daily_rows = daily_result['daily']
+        tomorrow_data = daily_rows[1]
+        city = str(location_data['name']).strip()
+        path = str(location_data.get('path') or '').strip()
+        path_parts = [part.strip() for part in path.split(',') if part.strip()]
+        if not city:
+            raise KeyError('location.name')
+        result = {
+            'location': {
+                'id': str(location_data.get('id') or '').strip(),
+                'city': city,
+                'region': path_parts[1] if len(path_parts) >= 2 else '',
+                'country': str(location_data.get('country') or '').strip(),
+                'path': path,
+                'timezone': str(location_data.get('timezone') or '').strip(),
+            },
+            'now': {
+                'text': str(now_data['text']).strip(),
+                'code': _required_int(now_data['code'], 'weather code', 0, 99),
+                'temperature': _required_int(
+                    now_data['temperature'], 'temperature', -80, 80
+                ),
+            },
+            'tomorrow': {
+                'date': str(tomorrow_data['date']).strip(),
+                'text': str(tomorrow_data['text_day']).strip(),
+                'code': _required_int(
+                    tomorrow_data['code_day'], 'tomorrow weather code', 0, 99
+                ),
+                'low': _required_int(tomorrow_data['low'], 'tomorrow low', -80, 80),
+                'high': _required_int(tomorrow_data['high'], 'tomorrow high', -80, 80),
+            },
+            'cached_at': datetime.now(timezone.utc).isoformat(),
+            'stale': False,
+        }
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise WeatherUpstreamError('weather provider returned an invalid payload') from exc
+    if not result['now']['text'] or not result['tomorrow']['date'] or not result['tomorrow']['text']:
+        raise WeatherUpstreamError('weather provider returned an incomplete payload')
+    return result
+
+
+def _weather_cache_key(client_ip):
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    ) or geoip_runtime_salt
+    return hashlib.sha256(
+        f'{salt}|weather-cache|{client_ip}'.encode('utf-8')
+    ).hexdigest()
+
+
+def _prune_weather_state(now):
+    for key, entry in list(weather_cache.items()):
+        if entry['stale_until'] <= now:
+            weather_cache.pop(key, None)
+    for key, attempted_at in list(weather_last_attempt.items()):
+        if now - attempted_at >= 60:
+            weather_last_attempt.pop(key, None)
+    while weather_upstream_attempts and now - weather_upstream_attempts[0] >= 60:
+        weather_upstream_attempts.popleft()
+
+
+def resolve_visitor_weather(client_ip):
+    """Resolve weather without storing or returning the visitor's raw IP."""
+    normalized_ip = normalize_public_ip(client_ip)
+    cache_key = _weather_cache_key(normalized_ip)
+    now = time.monotonic()
+    stale_data = None
+
+    with weather_lock:
+        _prune_weather_state(now)
+        cached = weather_cache.get(cache_key)
+        if cached and cached['fresh_until'] > now:
+            result = dict(cached['data'])
+            result['stale'] = False
+            return result
+        if cached:
+            stale_data = dict(cached['data'])
+        last_attempt = weather_last_attempt.get(cache_key)
+        if last_attempt is not None and now - last_attempt < WEATHER_VISITOR_RETRY_SECONDS:
+            if stale_data:
+                stale_data['stale'] = True
+                return stale_data
+            retry_after = WEATHER_VISITOR_RETRY_SECONDS - (now - last_attempt)
+            raise WeatherRateLimitExceeded(
+                'visitor weather lookup retried too quickly', retry_after=retry_after
+            )
+        if len(weather_upstream_attempts) >= WEATHER_UPSTREAM_LIMIT_PER_MINUTE:
+            if stale_data:
+                stale_data['stale'] = True
+                return stale_data
+            retry_after = 60 - (now - weather_upstream_attempts[0])
+            raise WeatherRateLimitExceeded(
+                'weather provider request budget exhausted', retry_after=retry_after
+            )
+        weather_last_attempt[cache_key] = now
+        weather_upstream_attempts.append(now)
+
+    try:
+        result = fetch_seniverse_weather(normalized_ip)
+    except (WeatherConfigError, WeatherUpstreamError, WeatherRateLimitExceeded):
+        if stale_data:
+            stale_data['stale'] = True
+            return stale_data
+        raise
+
+    with weather_lock:
+        if len(weather_cache) >= WEATHER_CACHE_MAX_ENTRIES:
+            oldest_key = min(
+                weather_cache, key=lambda key: weather_cache[key]['stale_until']
+            )
+            weather_cache.pop(oldest_key, None)
+        weather_cache[cache_key] = {
+            'fresh_until': now + WEATHER_CACHE_TTL_SECONDS,
+            'stale_until': now + WEATHER_CACHE_STALE_SECONDS,
+            'data': dict(result),
+        }
+    return result
 
 
 def fetch_ip_api_location(client_ip):
@@ -339,16 +546,32 @@ def resolve_geoip_location(client_ip):
 
 
 def get_geoip_client_address(req):
-    """Trust ProxyFix's forwarded address only when the direct peer is local Apache."""
-    original = req.environ.get('werkzeug.proxy_fix.orig') or {}
-    peer_value = original.get('REMOTE_ADDR') or req.remote_addr
+    """Return the public client address already verified and resolved by Waitress."""
+    return normalize_public_ip(req.remote_addr)
+
+
+def get_waitress_proxy_settings():
+    """Build one fail-closed proxy trust policy for the production WSGI server."""
+    trusted_proxy = os.environ.get('SLEEPY_TRUSTED_PROXY', '127.0.0.1').strip()
+    settings = {
+        'trusted_proxy': trusted_proxy or None,
+        'trusted_proxy_headers': (
+            {'x-forwarded-for', 'x-forwarded-proto'} if trusted_proxy else set()
+        ),
+        'clear_untrusted_proxy_headers': True,
+    }
+    if not trusted_proxy:
+        return settings
+
+    raw_count = os.environ.get('SLEEPY_TRUSTED_PROXY_COUNT', '1').strip()
     try:
-        peer = ipaddress.ip_address(str(peer_value or '').strip())
+        trusted_proxy_count = int(raw_count)
     except ValueError as exc:
-        raise GeoIpClientError('direct peer IP is invalid') from exc
-    if peer.is_loopback:
-        return req.remote_addr
-    return str(peer)
+        raise RuntimeError('SLEEPY_TRUSTED_PROXY_COUNT must be an integer') from exc
+    if not 1 <= trusted_proxy_count <= 10:
+        raise RuntimeError('SLEEPY_TRUSTED_PROXY_COUNT must be between 1 and 10')
+    settings['trusted_proxy_count'] = trusted_proxy_count
+    return settings
 
 
 def normalize_blog_slug(value):
@@ -370,8 +593,7 @@ def get_blog_visitor_hash(req):
     if client_id:
         identity = f'cid:{str(client_id)[:200]}'
     else:
-        forwarded = req.headers.get('X-Forwarded-For', '')
-        ip = forwarded.split(',')[0].strip() if forwarded else (req.remote_addr or '')
+        ip = req.remote_addr or ''
         user_agent = req.headers.get('User-Agent', '')[:300]
         identity = f'ip:{ip}|ua:{user_agent}'
     salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
@@ -404,6 +626,38 @@ def get_community_actor_hash(email):
     )
     return hashlib.sha256(
         f'{salt}|community-email|{normalized}'.encode('utf-8')
+    ).hexdigest()
+
+
+FRIEND_APPLICATION_TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{32,128}$')
+COMMUNITY_IDENTITY_TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{32,128}$')
+
+
+def get_community_owner_hash(req):
+    """Hash the browser's opaque cross-site token for message ownership hints."""
+    token = str(req.headers.get('X-Community-Identity') or '').strip()
+    if not COMMUNITY_IDENTITY_TOKEN_RE.fullmatch(token):
+        return ''
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    return hashlib.sha256(
+        f'{salt}|community-owner|{token}'.encode('utf-8')
+    ).hexdigest()
+
+
+def hash_friend_application_token(token):
+    """Hash an opaque application lookup token before it reaches SQLite."""
+    normalized = str(token or '').strip()
+    if not FRIEND_APPLICATION_TOKEN_RE.fullmatch(normalized):
+        raise CommunityValidationError(
+            'invalid_tracking_token', 'friend-link tracking token is invalid'
+        )
+    salt = os.environ.get('SLEEPY_ANALYTICS_SALT') or str(
+        configured_value(d, 'SLEEPY_ADMIN_SECRET', 'admin_secret', '')
+    )
+    return hashlib.sha256(
+        f'{salt}|friend-application|{normalized}'.encode('utf-8')
     ).hexdigest()
 
 
@@ -1057,6 +1311,62 @@ def index():
     return u.format_dict({'success': True, 'service': 'personal-status-server'})
 
 
+@app.route('/weather')
+def visitor_weather():
+    """Return IP-personalized weather without exposing the API key or visitor IP."""
+    try:
+        result = resolve_visitor_weather(get_geoip_client_address(request))
+        payload = {'success': True, **result}
+        response = app.response_class(
+            response=json.dumps(payload, ensure_ascii=False),
+            status=200,
+            mimetype='application/json',
+        )
+    except GeoIpClientError:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'weather unavailable',
+                'message': 'visitor location is unavailable',
+            }, ensure_ascii=False),
+            status=400,
+            mimetype='application/json',
+        )
+    except WeatherConfigError:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'weather not configured',
+                'message': 'weather service is not configured',
+            }, ensure_ascii=False),
+            status=503,
+            mimetype='application/json',
+        )
+    except WeatherRateLimitExceeded as exc:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'weather rate limited',
+                'message': 'weather lookup is temporarily rate limited',
+            }, ensure_ascii=False),
+            status=429,
+            mimetype='application/json',
+        )
+        response.headers['Retry-After'] = str(exc.retry_after)
+    except WeatherUpstreamError:
+        response = app.response_class(
+            response=json.dumps({
+                'success': False,
+                'code': 'weather upstream error',
+                'message': 'weather provider is temporarily unavailable',
+            }, ensure_ascii=False),
+            status=502,
+            mimetype='application/json',
+        )
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
 @app.route('/geoip')
 def geoip():
     """Return coarse location for the current visitor without exposing/storing their IP."""
@@ -1528,6 +1838,62 @@ def blog_community_avatar(comment_id):
     response.headers['Cache-Control'] = 'public, max-age=3600'
     return response
 
+
+@app.route('/blog/community/feedback/avatar/<int:message_id>')
+def blog_feedback_avatar(message_id):
+    """Resolve a feedback-message avatar without exposing its stored email."""
+    avatar = community_store.get_feedback_avatar(message_id)
+    if avatar is None:
+        return reterr(code='not found', message='avatar not found'), 404
+    fallback = request.args.get('fallback', '')
+    qq_number = community_qq_number(avatar['email'])
+    if fallback == '2':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+    if qq_number and fallback != '1':
+        response = redirect(community_qq_avatar_url(qq_number), code=302)
+    elif fallback == '1' and qq_number:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    elif fallback == '1':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+    else:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
+
+@app.route('/blog/community/feedback/room-avatar/<int:message_id>')
+def blog_feedback_room_avatar(message_id):
+    """Resolve a feedback-room chat avatar without exposing its stored email."""
+    avatar = community_store.get_feedback_room_avatar(message_id)
+    if avatar is None:
+        return reterr(code='not found', message='avatar not found'), 404
+    fallback = request.args.get('fallback', '')
+    qq_number = community_qq_number(avatar['email'])
+    if fallback == '2':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+    if qq_number and fallback != '1':
+        response = redirect(community_qq_avatar_url(qq_number), code=302)
+    elif fallback == '1' and qq_number:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    elif fallback == '1':
+        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        response.headers['Content-Security-Policy'] = "default-src 'none'"
+        return response
+    else:
+        response = redirect(community_gravatar_url(avatar['email']), code=302)
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
 @app.route('/blog/community/likes', methods=['GET'])
 def blog_community_likes():
     """Read like totals and the current anonymous visitor's state."""
@@ -1594,6 +1960,7 @@ def blog_community_comments(page):
             comments = community_store.list_public_comments(
                 normalized_page,
                 include_nonpublished=verify_admin_secret(),
+                viewer_owner_hash=get_community_owner_hash(request),
             )
         except Exception:
             return reterr(code='server error', message='failed to read comments')
@@ -1613,6 +1980,7 @@ def blog_community_comments(page):
         submission = validate_comment_payload(normalized_page, payload)
         is_admin = verify_admin_secret()
         actor_hash = get_community_actor_hash(submission.email)
+        owner_hash = get_community_owner_hash(request)
         parent_context = community_store.get_parent_context(
             normalized_page,
             submission.parent_id,
@@ -1667,6 +2035,7 @@ def blog_community_comments(page):
             moderation_reason=f'{moderation.category}: {moderation.reason}',
             parent_context=parent_context,
             is_admin=is_admin,
+            owner_hash=owner_hash,
         )
     except Exception:
         return reterr(code='server error', message='failed to save comment')
@@ -1738,6 +2107,311 @@ def manage_blog_community_comment(comment_id):
     return response
 
 
+def moderate_feedback_submission(submission, *, is_admin=False):
+    """Apply the existing community identity, quota, and moderation policy to feedback."""
+    actor_hash = get_community_actor_hash(submission.email)
+    owner_hash = get_community_owner_hash(request)
+    ip_key, client_key = get_community_rate_limit_keys(request)
+    community_comment_limiter.check(ip_key, client_key, actor_hash)
+    daily_limit = community_limit_from_env('SLEEPY_COMMENT_DAILY_LIMIT', 20, 200)
+    community_store.reserve_comment_quota(
+        {f'email:{actor_hash}', f'ip:{ip_key}', f'client:{client_key}'},
+        daily_limit=daily_limit,
+    )
+    history = community_store.actor_history(actor_hash)
+    history.extend(community_store.feedback_actor_history(actor_hash))
+    history.sort(key=lambda item: str(item.get('created_at') or ''))
+    moderation = (
+        ModerationResult('allow', 'admin', 'administrator feedback')
+        if is_admin
+        else comment_moderator.moderate(
+            page='feedback',
+            nickname=submission.nickname,
+            content=submission.content,
+            reply_to_name='',
+            history=history,
+        )
+    )
+    return (
+        actor_hash,
+        owner_hash,
+        {'allow': 'published', 'reject': 'rejected', 'review': 'pending'}[
+            moderation.decision
+        ],
+        f'{moderation.category}: {moderation.reason}',
+    )
+
+
+@app.route('/blog/community/feedback', methods=['GET', 'POST'])
+def blog_community_feedback():
+    """List feedback topics or create a moderated topic."""
+    admin_requested = bool(
+        request.args.get('secret') or request.headers.get('X-Admin-Secret')
+    )
+    if admin_requested and not verify_admin_secret():
+        return reterr(code='not authorized', message='invalid admin secret'), 401
+    if request.method == 'GET':
+        try:
+            include_nonpublished = verify_admin_secret()
+            viewer_owner_hash = get_community_owner_hash(request)
+            topics = community_store.list_feedback_topics(
+                include_nonpublished=include_nonpublished,
+                viewer_owner_hash=viewer_owner_hash,
+            )
+            room_messages = community_store.list_feedback_room_messages(
+                include_nonpublished=include_nonpublished,
+                viewer_owner_hash=viewer_owner_hash,
+            )
+        except Exception:
+            return reterr(code='server error', message='failed to read feedback'), 500
+        response = u.format_dict(
+            {
+                'success': True,
+                'topics': topics,
+                'room_messages': room_messages,
+                'count': len(topics),
+            }
+        )
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    if request.content_length is not None and request.content_length > 12288:
+        return reterr(code='body too large', message='feedback request exceeds 12288 bytes'), 413
+    try:
+        payload = request.get_json(force=False, silent=False)
+        submission = validate_feedback_topic_payload(payload)
+        is_admin = verify_admin_secret()
+        actor_hash, owner_hash, status, reason = moderate_feedback_submission(
+            submission.author, is_admin=is_admin
+        )
+        topic = community_store.create_feedback_topic(
+            submission,
+            actor_hash,
+            status=status,
+            moderation_reason=reason,
+            is_admin=is_admin,
+            owner_hash=owner_hash,
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except CommunityRateLimitExceeded as exc:
+        message = (
+            'daily comment limit reached'
+            if str(exc) == 'daily_limit'
+            else 'too many comments in a short time'
+        )
+        return reterr(code='rate limited', message=message), 429
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid feedback object'), 400
+    if status == 'rejected':
+        return reterr(
+            code='feedback rejected',
+            message='反馈未通过内容审核，请避免广告、重复内容或无意义灌水',
+        ), 400
+    response = u.format_dict(
+        {
+            'success': True,
+            'status': status,
+            'topic': topic,
+            'message': '反馈已发布' if status == 'published' else '反馈已提交，等待人工确认',
+        }
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 201
+
+
+@app.route('/blog/community/feedback/messages', methods=['POST'])
+def add_blog_feedback_room_message():
+    """Post a normal moderated chat message in the Feedback room."""
+    if request.content_length is not None and request.content_length > 8192:
+        return reterr(code='body too large', message='feedback message exceeds 8192 bytes'), 413
+    try:
+        payload = request.get_json(force=False, silent=False)
+        submission = validate_feedback_message_payload(payload)
+        is_admin = verify_admin_secret()
+        actor_hash, owner_hash, status, reason = moderate_feedback_submission(
+            submission, is_admin=is_admin
+        )
+        message_item = community_store.add_feedback_room_message(
+            submission,
+            actor_hash,
+            status=status,
+            moderation_reason=reason,
+            is_admin=is_admin,
+            owner_hash=owner_hash,
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except CommunityRateLimitExceeded as exc:
+        message_text = (
+            'daily comment limit reached'
+            if str(exc) == 'daily_limit'
+            else 'too many comments in a short time'
+        )
+        return reterr(code='rate limited', message=message_text), 429
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid feedback message'), 400
+    if status == 'rejected':
+        return reterr(
+            code='feedback rejected',
+            message='消息未通过内容审核，请避免广告、重复内容或无意义灌水',
+        ), 400
+    response = u.format_dict(
+        {
+            'success': True,
+            'status': status,
+            'message_item': message_item if status == 'published' else None,
+            'message': '消息已发送' if status == 'published' else '消息已提交，等待人工确认',
+        }
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 201
+
+
+@app.route('/blog/community/feedback/<int:topic_id>/messages', methods=['POST'])
+def add_blog_feedback_message(topic_id):
+    """Append a moderated public message to an existing feedback topic."""
+    if request.content_length is not None and request.content_length > 8192:
+        return reterr(code='body too large', message='feedback reply exceeds 8192 bytes'), 413
+    try:
+        payload = request.get_json(force=False, silent=False)
+        submission = validate_feedback_message_payload(payload)
+        is_admin = verify_admin_secret()
+        actor_hash, owner_hash, status, reason = moderate_feedback_submission(
+            submission, is_admin=is_admin
+        )
+        message = community_store.add_feedback_message(
+            topic_id,
+            submission,
+            actor_hash,
+            status=status,
+            moderation_reason=reason,
+            is_admin=is_admin,
+            owner_hash=owner_hash,
+        )
+    except CommunityValidationError as exc:
+        status_code = 404 if exc.code == 'not_found' else 400
+        return reterr(code=exc.code, message=exc.message), status_code
+    except CommunityRateLimitExceeded as exc:
+        message_text = (
+            'daily comment limit reached'
+            if str(exc) == 'daily_limit'
+            else 'too many comments in a short time'
+        )
+        return reterr(code='rate limited', message=message_text), 429
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid feedback reply'), 400
+    if status == 'rejected':
+        return reterr(
+            code='feedback rejected',
+            message='回复未通过内容审核，请避免广告、重复内容或无意义灌水',
+        ), 400
+    response = u.format_dict(
+        {
+            'success': True,
+            'status': status,
+            'message_item': message if status == 'published' else None,
+            'message': '回复已发布' if status == 'published' else '回复已提交，等待人工确认',
+        }
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 201
+
+
+@app.route('/blog/community/feedback/<int:topic_id>', methods=['PATCH', 'DELETE'])
+def manage_blog_feedback_topic(topic_id):
+    """Update or soft-delete a feedback topic as administrator."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    if request.method == 'DELETE':
+        try:
+            deleted = community_store.delete_feedback_topic(topic_id)
+        except Exception:
+            return reterr(code='server error', message='failed to delete feedback topic'), 500
+        if not deleted:
+            return reterr(code='not found', message='feedback topic not found'), 404
+        response = u.format_dict({'success': True, 'deleted': deleted})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict):
+            raise CommunityValidationError('invalid_body', 'expected a JSON object')
+        updated = community_store.update_feedback_topic(
+            topic_id,
+            title=payload.get('title') if 'title' in payload else None,
+            kind=payload.get('kind') if 'kind' in payload else None,
+            status=payload.get('status') if 'status' in payload else None,
+            resolution_note=(
+                payload.get('resolution_note') if 'resolution_note' in payload else None
+            ),
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except Exception:
+        return reterr(code='invalid JSON', message='expected a valid feedback update'), 400
+    if not updated:
+        return reterr(code='not found', message='feedback topic not found'), 404
+    response = u.format_dict({'success': True, 'topic_id': topic_id})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/feedback/from-comment', methods=['POST'])
+def convert_comment_tree_to_feedback():
+    """Move one complete public comment tree into a feedback topic."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict):
+            raise CommunityValidationError('invalid_body', 'expected a JSON object')
+        topic_id = community_store.attach_comment_tree_to_feedback(
+            int(payload.get('root_comment_id')),
+            topic_id=(int(payload['topic_id']) if payload.get('topic_id') else None),
+            title=str(payload.get('title') or ''),
+            kind=str(payload.get('kind') or 'bug').strip().lower(),
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except (TypeError, ValueError):
+        return reterr(code='invalid_comment', message='root comment id is invalid'), 400
+    except Exception:
+        return reterr(code='server error', message='failed to convert comment tree'), 500
+    response = u.format_dict({'success': True, 'topic_id': topic_id})
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 201
+
+
+@app.route('/blog/community/feedback/merge', methods=['POST'])
+def merge_blog_feedback_topics():
+    """Merge selected feedback topics into one retained target without deleting history."""
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict) or not isinstance(payload.get('source_topic_ids'), list):
+            raise CommunityValidationError('invalid_body', 'source_topic_ids must be an array')
+        merged = community_store.merge_feedback_topics(
+            int(payload.get('target_topic_id')),
+            [int(item) for item in payload['source_topic_ids']],
+            title=(str(payload['title']) if 'title' in payload else None),
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except (TypeError, ValueError):
+        return reterr(code='invalid_topic', message='feedback topic id is invalid'), 400
+    except Exception:
+        return reterr(code='server error', message='failed to merge feedback topics'), 500
+    response = u.format_dict(
+        {'success': True, 'target_topic_id': int(payload['target_topic_id']), 'merged': merged}
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/blog/community/friend-applications', methods=['GET', 'POST'])
 def blog_friend_applications():
     """Submit a pending friend-link application or list applications for admins."""
@@ -1761,9 +2435,11 @@ def blog_friend_applications():
         submission = validate_friend_application_payload(payload)
         ip_key, client_key = get_community_rate_limit_keys(request)
         friend_application_limiter.check(ip_key, client_key)
+        tracking_token = secrets.token_urlsafe(32)
         application = community_store.create_friend_application(
             submission,
             get_blog_visitor_hash(request),
+            tracking_hash=hash_friend_application_token(tracking_token),
         )
     except CommunityValidationError as exc:
         return reterr(code=exc.code, message=exc.message), 400
@@ -1774,10 +2450,45 @@ def blog_friend_applications():
     response = u.format_dict({
         'success': True,
         'status': application['status'],
+        'application': {
+            key: application[key]
+            for key in (
+                'id', 'name', 'website', 'avatar', 'description', 'status',
+                'moderation_note', 'created_at', 'updated_at'
+            )
+        },
+        'tracking_token': tracking_token,
         'message': '友链申请已提交，等待审核',
     })
     response.headers['Cache-Control'] = 'no-store'
     return response, 201
+
+
+@app.route('/blog/community/friend-applications/status', methods=['POST'])
+def get_own_blog_friend_applications():
+    """Return applications addressed by private tracking tokens held by the visitor."""
+    if request.content_length is not None and request.content_length > 16384:
+        return reterr(code='body too large', message='status request exceeds 16384 bytes'), 413
+    try:
+        payload = request.get_json(force=False, silent=False)
+        if not isinstance(payload, dict) or not isinstance(payload.get('tokens'), list):
+            raise CommunityValidationError('invalid_body', 'tokens must be an array')
+        tokens = list(dict.fromkeys(str(item or '').strip() for item in payload['tokens']))
+        if len(tokens) > 20:
+            raise CommunityValidationError(
+                'too_many_tracking_tokens', 'at most 20 tracking tokens are allowed'
+            )
+        tracking_hashes = [hash_friend_application_token(token) for token in tokens]
+        applications = community_store.list_friend_applications_by_tracking_hashes(
+            tracking_hashes
+        )
+    except CommunityValidationError as exc:
+        return reterr(code=exc.code, message=exc.message), 400
+    except Exception:
+        return reterr(code='invalid JSON', message='expected valid tracking tokens'), 400
+    response = u.format_dict({'success': True, 'applications': applications})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/blog/community/friend-applications/<int:application_id>', methods=['POST'])
@@ -2425,12 +3136,9 @@ if __name__ == '__main__':
     from waitress import serve
 
     d.load()
-    trusted_proxy = os.environ.get('SLEEPY_TRUSTED_PROXY', '127.0.0.1').strip()
     serve(app,
         host=os.environ.get('SLEEPY_HOST', d.data.get('host', '0.0.0.0')),
         port=int(os.environ.get('SLEEPY_PORT', d.data.get('port', 9010))),
         threads=16,
-        trusted_proxy=trusted_proxy or None,
-        trusted_proxy_headers={'x-forwarded-for', 'x-forwarded-proto'} if trusted_proxy else set(),
-        clear_untrusted_proxy_headers=True,
+        **get_waitress_proxy_settings(),
     )

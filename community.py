@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,8 @@ COMMENT_PAGES = {"about", "friends"}
 COMMENT_STATUSES = {"published", "pending", "rejected", "deleted"}
 COMMENT_MODERATION_STATUSES = {"published", "rejected"}
 FRIEND_APPLICATION_STATUSES = {"pending", "approved", "rejected"}
+FEEDBACK_KINDS = {"bug", "suggestion", "content", "other"}
+FEEDBACK_STATUSES = {"open", "in_progress", "resolved", "merged"}
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 EMAIL_RE = re.compile(
     r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
@@ -66,6 +69,21 @@ class FriendApplicationSubmission:
     avatar: str
     description: str
     email: str
+
+
+@dataclass(frozen=True)
+class FeedbackSubmission:
+    nickname: str
+    email: str
+    website: str
+    content: str
+
+
+@dataclass(frozen=True)
+class FeedbackTopicSubmission:
+    title: str
+    kind: str
+    author: FeedbackSubmission
 
 
 def default_community_database_path() -> str:
@@ -213,6 +231,29 @@ def validate_friend_application_payload(payload: Any) -> FriendApplicationSubmis
     )
 
 
+def validate_feedback_message_payload(payload: Any) -> FeedbackSubmission:
+    if not isinstance(payload, dict):
+        raise CommunityValidationError("invalid_body", "expected a JSON object")
+    return FeedbackSubmission(
+        nickname=_single_line(payload.get("nickname"), "nickname", 30, required=True),
+        email=normalize_email(payload.get("email")),
+        website=_website(payload.get("website")),
+        content=_comment_text(payload.get("content")),
+    )
+
+
+def validate_feedback_topic_payload(payload: Any) -> FeedbackTopicSubmission:
+    author = validate_feedback_message_payload(payload)
+    kind = _single_line(payload.get("kind"), "kind", 20, required=True).lower()
+    if kind not in FEEDBACK_KINDS:
+        raise CommunityValidationError("invalid_kind", "feedback kind is invalid")
+    return FeedbackTopicSubmission(
+        title=_single_line(payload.get("title"), "title", 70, required=True),
+        kind=kind,
+        author=author,
+    )
+
+
 class CommunityStore:
     def __init__(self, database_path: str | None = None):
         self.database_path = database_path or default_community_database_path()
@@ -254,6 +295,7 @@ class CommunityStore:
                     parent_id INTEGER REFERENCES community_comments(id),
                     root_id INTEGER REFERENCES community_comments(id),
                     actor_hash TEXT NOT NULL,
+                    owner_hash TEXT NOT NULL DEFAULT '',
                     nickname TEXT NOT NULL,
                     email TEXT NOT NULL,
                     website TEXT NOT NULL DEFAULT '',
@@ -290,12 +332,97 @@ class CommunityStore:
                         CHECK (status IN ('pending', 'approved', 'rejected')),
                     moderation_note TEXT NOT NULL DEFAULT '',
                     submitter_hash TEXT NOT NULL DEFAULT '',
+                    tracking_hash TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_friend_applications_status
                     ON friend_link_applications(status, id);
+
+                CREATE TABLE IF NOT EXISTS community_feedback_topics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('bug', 'suggestion', 'content', 'other')),
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'in_progress', 'resolved', 'merged')),
+                    actor_hash TEXT NOT NULL,
+                    owner_hash TEXT NOT NULL DEFAULT '',
+                    nickname TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    website TEXT NOT NULL DEFAULT '',
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    resolution_note TEXT NOT NULL DEFAULT '',
+                    merged_into_id INTEGER REFERENCES community_feedback_topics(id),
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_topics_status
+                    ON community_feedback_topics(status, updated_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS community_feedback_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic_id INTEGER NOT NULL REFERENCES community_feedback_topics(id),
+                    actor_hash TEXT NOT NULL,
+                    owner_hash TEXT NOT NULL DEFAULT '',
+                    nickname TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    website TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('published', 'pending', 'rejected', 'deleted')),
+                    moderation_reason TEXT NOT NULL DEFAULT '',
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_messages_topic
+                    ON community_feedback_messages(topic_id, status, id);
+
+                CREATE TABLE IF NOT EXISTS community_feedback_room_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_hash TEXT NOT NULL,
+                    owner_hash TEXT NOT NULL DEFAULT '',
+                    nickname TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    website TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('published', 'pending', 'rejected', 'deleted')),
+                    moderation_reason TEXT NOT NULL DEFAULT '',
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_room_messages_public
+                    ON community_feedback_room_messages(status, created_at, id);
+
+                CREATE TABLE IF NOT EXISTS community_feedback_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic_id INTEGER NOT NULL REFERENCES community_feedback_topics(id),
+                    page TEXT NOT NULL CHECK (page IN ('about', 'friends')),
+                    root_comment_id INTEGER NOT NULL REFERENCES community_comments(id),
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(topic_id, page, root_comment_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_sources_topic
+                    ON community_feedback_sources(topic_id, id);
+
+                CREATE TABLE IF NOT EXISTS community_feedback_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic_id INTEGER NOT NULL REFERENCES community_feedback_topics(id),
+                    event_type TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_events_topic
+                    ON community_feedback_events(topic_id, id);
                 """
             )
             comment_columns = {
@@ -310,6 +437,66 @@ class CommunityStore:
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
                         raise
+            if "owner_hash" not in comment_columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE community_comments "
+                        "ADD COLUMN owner_hash TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            if "moved_to_feedback_id" not in comment_columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE community_comments "
+                        "ADD COLUMN moved_to_feedback_id INTEGER"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_community_comments_owner "
+                "ON community_comments(owner_hash, id) WHERE owner_hash != ''"
+            )
+            friend_application_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(friend_link_applications)"
+                ).fetchall()
+            }
+            if "tracking_hash" not in friend_application_columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE friend_link_applications "
+                        "ADD COLUMN tracking_hash TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_friend_applications_tracking "
+                "ON friend_link_applications(tracking_hash) WHERE tracking_hash != ''"
+            )
+            feedback_topic_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(community_feedback_topics)"
+                ).fetchall()
+            }
+            if "deleted_at" not in feedback_topic_columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE community_feedback_topics ADD COLUMN deleted_at TEXT"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_topics_visible "
+                "ON community_feedback_topics(status, updated_at DESC, id DESC) "
+                "WHERE deleted_at IS NULL"
+            )
 
     def toggle_like(self, target: str, identity_hash: str) -> tuple[int, bool]:
         target = normalize_like_target(target)
@@ -461,6 +648,7 @@ class CommunityStore:
         moderation_reason: str = "",
         parent_context: dict[str, Any] | None = None,
         is_admin: bool = False,
+        owner_hash: str = "",
         now: datetime | None = None,
     ) -> dict[str, Any]:
         if status not in COMMENT_STATUSES:
@@ -476,15 +664,16 @@ class CommunityStore:
             cursor = connection.execute(
                 """
                 INSERT INTO community_comments
-                    (page, parent_id, root_id, actor_hash, nickname, email, website,
+                    (page, parent_id, root_id, actor_hash, owner_hash, nickname, email, website,
                      content, status, moderation_reason, is_admin, created_at, created_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     submission.page,
                     parent_id,
                     root_id,
                     actor_hash,
+                    owner_hash,
                     submission.nickname,
                     submission.email,
                     submission.website,
@@ -512,6 +701,7 @@ class CommunityStore:
             "content": submission.content,
             "status": status,
             "is_admin": bool(is_admin),
+            "owned": bool(owner_hash),
             "author_key": public_author_key(actor_hash),
             "created_at": created_at,
             "reply_to_name": parent_context["nickname"] if parent_context else "",
@@ -523,13 +713,14 @@ class CommunityStore:
         *,
         limit: int = 300,
         include_nonpublished: bool = False,
+        viewer_owner_hash: str = "",
     ) -> list[dict[str, Any]]:
         page = normalize_comment_page(page)
         self.initialize()
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT c.id, c.page, c.parent_id, c.root_id, c.actor_hash,
+                SELECT c.id, c.page, c.parent_id, c.root_id, c.actor_hash, c.owner_hash,
                        c.nickname, c.email, c.website,
                        c.content, c.status, c.is_admin, c.created_at,
                        c.moderation_reason, parent.nickname AS reply_to_name
@@ -554,6 +745,10 @@ class CommunityStore:
                 "content": str(row["content"]),
                 "status": str(row["status"]),
                 "is_admin": bool(row["is_admin"]),
+                "owned": bool(
+                    viewer_owner_hash
+                    and str(row["owner_hash"] or "") == viewer_owner_hash
+                ),
                 "author_key": public_author_key(str(row["actor_hash"])),
                 "created_at": str(row["created_at"]),
                 "reply_to_name": str(row["reply_to_name"] or ""),
@@ -622,11 +817,730 @@ class CommunityStore:
                 )
         return ids
 
+    @staticmethod
+    def _feedback_message_dict(
+        row: sqlite3.Row,
+        *,
+        viewer_owner_hash: str = "",
+        include_private: bool = False,
+    ) -> dict[str, Any]:
+        message = {
+            "id": int(row["id"]),
+            "topic_id": int(row["topic_id"]),
+            "nickname": str(row["nickname"]),
+            "website": str(row["website"]),
+            "content": str(row["content"]),
+            "status": str(row["status"]),
+            "is_admin": bool(row["is_admin"]),
+            "owned": bool(
+                viewer_owner_hash
+                and str(row["owner_hash"] or "") == viewer_owner_hash
+            ),
+            "author_key": public_author_key(str(row["actor_hash"])),
+            "created_at": str(row["created_at"]),
+        }
+        if include_private:
+            message["email"] = str(row["email"] or "")
+            message["moderation_reason"] = str(row["moderation_reason"] or "")
+        return message
+
+    @staticmethod
+    def _feedback_room_message_dict(
+        row: sqlite3.Row,
+        *,
+        viewer_owner_hash: str = "",
+        include_private: bool = False,
+    ) -> dict[str, Any]:
+        message = {
+            "id": int(row["id"]),
+            "nickname": str(row["nickname"]),
+            "website": str(row["website"]),
+            "content": str(row["content"]),
+            "status": str(row["status"]),
+            "is_admin": bool(row["is_admin"]),
+            "owned": bool(
+                viewer_owner_hash
+                and str(row["owner_hash"] or "") == viewer_owner_hash
+            ),
+            "author_key": public_author_key(str(row["actor_hash"])),
+            "created_at": str(row["created_at"]),
+        }
+        if include_private:
+            message["email"] = str(row["email"] or "")
+            message["moderation_reason"] = str(row["moderation_reason"] or "")
+        return message
+
+    def add_feedback_room_message(
+        self,
+        submission: FeedbackSubmission,
+        actor_hash: str,
+        *,
+        status: str,
+        moderation_reason: str = "",
+        is_admin: bool = False,
+        owner_hash: str = "",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if status not in COMMENT_STATUSES:
+            raise ValueError("invalid feedback room message status")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        timestamp = current.astimezone(timezone.utc).isoformat()
+        self.initialize()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO community_feedback_room_messages
+                    (actor_hash, owner_hash, nickname, email, website, content,
+                     status, moderation_reason, is_admin, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    actor_hash,
+                    owner_hash,
+                    submission.nickname,
+                    submission.email,
+                    submission.website,
+                    submission.content,
+                    status,
+                    moderation_reason[:300],
+                    1 if is_admin else 0,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM community_feedback_room_messages WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._feedback_room_message_dict(
+            row,
+            viewer_owner_hash=owner_hash,
+            include_private=is_admin,
+        )
+
+    def list_feedback_room_messages(
+        self,
+        *,
+        include_nonpublished: bool = False,
+        viewer_owner_hash: str = "",
+        limit: int = 300,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT * FROM community_feedback_room_messages
+                    WHERE status != 'deleted' AND (? OR status = 'published')
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY created_at ASC, id ASC
+                """,
+                (1 if include_nonpublished else 0, max(1, min(500, int(limit)))),
+            ).fetchall()
+        return [
+            self._feedback_room_message_dict(
+                row,
+                viewer_owner_hash=viewer_owner_hash,
+                include_private=include_nonpublished,
+            )
+            for row in rows
+        ]
+
+    def create_feedback_topic(
+        self,
+        submission: FeedbackTopicSubmission,
+        actor_hash: str,
+        *,
+        status: str,
+        moderation_reason: str = "",
+        is_admin: bool = False,
+        owner_hash: str = "",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if status not in COMMENT_STATUSES:
+            raise ValueError("invalid feedback message status")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        timestamp = current.astimezone(timezone.utc).isoformat()
+        self.initialize()
+        with self._connect() as connection:
+            topic_cursor = connection.execute(
+                """
+                INSERT INTO community_feedback_topics
+                    (title, kind, status, actor_hash, owner_hash, nickname, email,
+                     website, is_admin, resolution_note, created_at, updated_at)
+                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, '', ?, ?)
+                """,
+                (
+                    submission.title,
+                    submission.kind,
+                    actor_hash,
+                    owner_hash,
+                    submission.author.nickname,
+                    submission.author.email,
+                    submission.author.website,
+                    1 if is_admin else 0,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            topic_id = int(topic_cursor.lastrowid)
+            message_cursor = connection.execute(
+                """
+                INSERT INTO community_feedback_messages
+                    (topic_id, actor_hash, owner_hash, nickname, email, website,
+                     content, status, moderation_reason, is_admin, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    topic_id,
+                    actor_hash,
+                    owner_hash,
+                    submission.author.nickname,
+                    submission.author.email,
+                    submission.author.website,
+                    submission.author.content,
+                    status,
+                    moderation_reason[:300],
+                    1 if is_admin else 0,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO community_feedback_events
+                    (topic_id, event_type, detail, created_at)
+                VALUES (?, 'created', ?, ?)
+                """,
+                (topic_id, submission.kind, timestamp),
+            )
+        return {
+            "id": topic_id,
+            "title": submission.title,
+            "kind": submission.kind,
+            "status": "open",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "message_id": int(message_cursor.lastrowid),
+            "message_status": status,
+        }
+
+    def add_feedback_message(
+        self,
+        topic_id: int,
+        submission: FeedbackSubmission,
+        actor_hash: str,
+        *,
+        status: str,
+        moderation_reason: str = "",
+        is_admin: bool = False,
+        owner_hash: str = "",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if status not in COMMENT_STATUSES:
+            raise ValueError("invalid feedback message status")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        timestamp = current.astimezone(timezone.utc).isoformat()
+        self.initialize()
+        with self._connect() as connection:
+            topic = connection.execute(
+                "SELECT id, status, merged_into_id FROM community_feedback_topics "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (int(topic_id),),
+            ).fetchone()
+            if topic is None:
+                raise CommunityValidationError("not_found", "feedback topic was not found")
+            if str(topic["status"]) == "merged":
+                raise CommunityValidationError("topic_merged", "feedback topic was merged")
+            cursor = connection.execute(
+                """
+                INSERT INTO community_feedback_messages
+                    (topic_id, actor_hash, owner_hash, nickname, email, website,
+                     content, status, moderation_reason, is_admin, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(topic_id),
+                    actor_hash,
+                    owner_hash,
+                    submission.nickname,
+                    submission.email,
+                    submission.website,
+                    submission.content,
+                    status,
+                    moderation_reason[:300],
+                    1 if is_admin else 0,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "UPDATE community_feedback_topics SET updated_at = ? WHERE id = ?",
+                (timestamp, int(topic_id)),
+            )
+        return {
+            "id": int(cursor.lastrowid),
+            "topic_id": int(topic_id),
+            "status": status,
+            "created_at": timestamp,
+        }
+
+    def feedback_actor_history(self, actor_hash: str) -> list[dict[str, Any]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT page, content, status, created_at FROM (
+                    SELECT 'feedback' AS page, m.content, m.status, m.created_at
+                    FROM community_feedback_messages AS m
+                    JOIN community_feedback_topics AS t ON t.id = m.topic_id
+                    WHERE m.actor_hash = ? AND m.status != 'deleted'
+                      AND t.deleted_at IS NULL
+                    UNION ALL
+                    SELECT 'feedback' AS page, content, status, created_at
+                    FROM community_feedback_room_messages
+                    WHERE actor_hash = ? AND status != 'deleted'
+                )
+                ORDER BY created_at ASC
+                """,
+                (actor_hash, actor_hash),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_feedback_topics(
+        self,
+        *,
+        include_nonpublished: bool = False,
+        viewer_owner_hash: str = "",
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        with self._connect() as connection:
+            topic_rows = connection.execute(
+                """
+                SELECT * FROM community_feedback_topics
+                WHERE deleted_at IS NULL
+                ORDER BY CASE status
+                    WHEN 'in_progress' THEN 0 WHEN 'open' THEN 1
+                    WHEN 'resolved' THEN 2 ELSE 3 END,
+                    updated_at DESC, id DESC
+                """
+            ).fetchall()
+            message_rows = connection.execute(
+                """
+                SELECT * FROM community_feedback_messages
+                WHERE status != 'deleted' AND (? OR status = 'published')
+                ORDER BY id ASC
+                """,
+                (1 if include_nonpublished else 0,),
+            ).fetchall()
+            source_rows = connection.execute(
+                "SELECT * FROM community_feedback_sources ORDER BY id ASC"
+            ).fetchall()
+            event_rows = connection.execute(
+                "SELECT * FROM community_feedback_events ORDER BY id ASC"
+            ).fetchall()
+        messages: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in message_rows:
+            messages[int(row["topic_id"])].append(
+                self._feedback_message_dict(
+                    row,
+                    viewer_owner_hash=viewer_owner_hash,
+                    include_private=include_nonpublished,
+                )
+            )
+        sources: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in source_rows:
+            try:
+                snapshot = json.loads(str(row["snapshot_json"]))
+            except (TypeError, ValueError):
+                snapshot = []
+            sources[int(row["topic_id"])].append(
+                {
+                    "id": int(row["id"]),
+                    "page": str(row["page"]),
+                    "root_comment_id": int(row["root_comment_id"]),
+                    "comments": snapshot if isinstance(snapshot, list) else [],
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        events: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in event_rows:
+            events[int(row["topic_id"])].append(
+                {
+                    "id": int(row["id"]),
+                    "type": str(row["event_type"]),
+                    "detail": str(row["detail"]),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        topics = []
+        for row in topic_rows:
+            topic_messages = messages.get(int(row["id"]), [])
+            topic_sources = sources.get(int(row["id"]), [])
+            if (
+                not include_nonpublished
+                and str(row["status"]) != "merged"
+                and not topic_messages
+                and not topic_sources
+            ):
+                continue
+            item = {
+                "id": int(row["id"]),
+                "title": str(row["title"]),
+                "kind": str(row["kind"]),
+                "status": str(row["status"]),
+                "nickname": str(row["nickname"]),
+                "website": str(row["website"]),
+                "is_admin": bool(row["is_admin"]),
+                "owned": bool(
+                    viewer_owner_hash
+                    and str(row["owner_hash"] or "") == viewer_owner_hash
+                ),
+                "author_key": public_author_key(str(row["actor_hash"])),
+                "resolution_note": str(row["resolution_note"]),
+                "merged_into_id": (
+                    int(row["merged_into_id"]) if row["merged_into_id"] else None
+                ),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "messages": topic_messages,
+                "sources": topic_sources,
+                "events": events.get(int(row["id"]), []),
+            }
+            if include_nonpublished:
+                item["email"] = str(row["email"])
+            topics.append(item)
+        return topics
+
+    def update_feedback_topic(
+        self,
+        topic_id: int,
+        *,
+        title: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        resolution_note: str | None = None,
+    ) -> bool:
+        updates: list[str] = []
+        values: list[Any] = []
+        if title is not None:
+            updates.append("title = ?")
+            values.append(_single_line(title, "title", 70, required=True))
+        if kind is not None:
+            normalized_kind = _single_line(kind, "kind", 20, required=True).lower()
+            if normalized_kind not in FEEDBACK_KINDS:
+                raise CommunityValidationError("invalid_kind", "feedback kind is invalid")
+            updates.append("kind = ?")
+            values.append(normalized_kind)
+        if status is not None:
+            normalized_status = _single_line(status, "status", 20, required=True).lower()
+            if normalized_status not in FEEDBACK_STATUSES - {"merged"}:
+                raise CommunityValidationError("invalid_status", "feedback status is invalid")
+            updates.append("status = ?")
+            values.append(normalized_status)
+        if resolution_note is not None:
+            updates.append("resolution_note = ?")
+            values.append(_single_line(resolution_note, "resolution_note", 300))
+        if not updates:
+            raise CommunityValidationError("empty_update", "feedback update is empty")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        updates.append("updated_at = ?")
+        values.extend([timestamp, int(topic_id)])
+        self.initialize()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE community_feedback_topics SET {', '.join(updates)} "
+                "WHERE id = ? AND status != 'merged' AND deleted_at IS NULL",
+                values,
+            )
+            if cursor.rowcount:
+                detail = json.dumps(
+                    {"title": title, "kind": kind, "status": status},
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO community_feedback_events
+                        (topic_id, event_type, detail, created_at)
+                    VALUES (?, 'updated', ?, ?)
+                    """,
+                    (int(topic_id), detail, timestamp),
+                )
+        return cursor.rowcount > 0
+
+    def delete_feedback_topic(self, topic_id: int) -> list[int]:
+        """Soft-delete a feedback card and any cards already merged into it."""
+        self.initialize()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM community_feedback_topics
+                WHERE deleted_at IS NULL
+                  AND (id = ? OR (status = 'merged' AND merged_into_id = ?))
+                ORDER BY id ASC
+                """,
+                (int(topic_id), int(topic_id)),
+            ).fetchall()
+            deleted_ids = [int(row["id"]) for row in rows]
+            if not deleted_ids:
+                return []
+            placeholders = ",".join("?" for _ in deleted_ids)
+            connection.execute(
+                f"UPDATE community_feedback_topics "
+                f"SET deleted_at = ?, updated_at = ? WHERE id IN ({placeholders})",
+                [timestamp, timestamp, *deleted_ids],
+            )
+            connection.executemany(
+                """
+                INSERT INTO community_feedback_events
+                    (topic_id, event_type, detail, created_at)
+                VALUES (?, 'deleted', 'administrator', ?)
+                """,
+                [(deleted_id, timestamp) for deleted_id in deleted_ids],
+            )
+        return deleted_ids
+
+    def attach_comment_tree_to_feedback(
+        self,
+        root_comment_id: int,
+        *,
+        topic_id: int | None = None,
+        title: str = "",
+        kind: str = "bug",
+    ) -> int:
+        if kind not in FEEDBACK_KINDS:
+            raise CommunityValidationError("invalid_kind", "feedback kind is invalid")
+        self.initialize()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            root = connection.execute(
+                """
+                SELECT * FROM community_comments
+                WHERE id = ? AND status = 'published'
+                """,
+                (int(root_comment_id),),
+            ).fetchone()
+            if root is None:
+                raise CommunityValidationError("not_found", "comment tree was not found")
+            actual_root_id = int(root["root_id"] or root["id"])
+            root = connection.execute(
+                "SELECT * FROM community_comments WHERE id = ? AND status = 'published'",
+                (actual_root_id,),
+            ).fetchone()
+            tree_rows = connection.execute(
+                """
+                SELECT c.id, c.parent_id, c.root_id, c.nickname, c.website, c.content,
+                       c.is_admin, c.created_at, c.actor_hash
+                FROM community_comments AS c
+                WHERE c.root_id = ? AND c.status = 'published'
+                ORDER BY c.id ASC
+                """,
+                (actual_root_id,),
+            ).fetchall()
+            snapshot = [
+                {
+                    "id": int(row["id"]),
+                    "parent_id": int(row["parent_id"]) if row["parent_id"] else None,
+                    "root_id": int(row["root_id"]),
+                    "nickname": str(row["nickname"]),
+                    "website": str(row["website"]),
+                    "content": str(row["content"]),
+                    "is_admin": bool(row["is_admin"]),
+                    "author_key": public_author_key(str(row["actor_hash"])),
+                    "created_at": str(row["created_at"]),
+                }
+                for row in tree_rows
+            ]
+            if topic_id is None:
+                topic_title = _single_line(
+                    title or str(root["content"])[:42], "title", 70, required=True
+                )
+                topic_cursor = connection.execute(
+                    """
+                    INSERT INTO community_feedback_topics
+                        (title, kind, status, actor_hash, owner_hash, nickname, email,
+                         website, is_admin, resolution_note, created_at, updated_at)
+                    VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    """,
+                    (
+                        topic_title,
+                        kind,
+                        str(root["actor_hash"]),
+                        str(root["owner_hash"] or ""),
+                        str(root["nickname"]),
+                        str(root["email"]),
+                        str(root["website"]),
+                        int(root["is_admin"]),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                topic_id = int(topic_cursor.lastrowid)
+            else:
+                exists = connection.execute(
+                    "SELECT 1 FROM community_feedback_topics "
+                    "WHERE id = ? AND status != 'merged' AND deleted_at IS NULL",
+                    (int(topic_id),),
+                ).fetchone()
+                if exists is None:
+                    raise CommunityValidationError("not_found", "feedback topic was not found")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO community_feedback_sources
+                    (topic_id, page, root_comment_id, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(topic_id),
+                    str(root["page"]),
+                    actual_root_id,
+                    json.dumps(snapshot, ensure_ascii=False),
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "UPDATE community_feedback_topics SET updated_at = ? WHERE id = ?",
+                (timestamp, int(topic_id)),
+            )
+            moved_ids = [int(row["id"]) for row in tree_rows]
+            if moved_ids:
+                placeholders = ",".join("?" for _ in moved_ids)
+                connection.execute(
+                    f"""
+                    UPDATE community_comments
+                    SET status = 'deleted', moved_to_feedback_id = ?
+                    WHERE id IN ({placeholders})
+                    """,
+                    [int(topic_id), *moved_ids],
+                )
+            connection.execute(
+                """
+                INSERT INTO community_feedback_events
+                    (topic_id, event_type, detail, created_at)
+                VALUES (?, 'source_moved', ?, ?)
+                """,
+                (int(topic_id), f"{root['page']}:{actual_root_id}", timestamp),
+            )
+        return int(topic_id)
+
+    def get_feedback_room_avatar(self, message_id: int) -> dict[str, str] | None:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT email, nickname FROM community_feedback_room_messages
+                WHERE id = ? AND status = 'published'
+                """,
+                (int(message_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"email": str(row["email"]), "nickname": str(row["nickname"])}
+
+    def merge_feedback_topics(
+        self,
+        target_topic_id: int,
+        source_topic_ids: Iterable[int],
+        *,
+        title: str | None = None,
+    ) -> list[int]:
+        target_id = int(target_topic_id)
+        source_ids = sorted({int(item) for item in source_topic_ids if int(item) != target_id})
+        if not source_ids:
+            raise CommunityValidationError("empty_merge", "select feedback topics to merge")
+        self.initialize()
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            target = connection.execute(
+                "SELECT id FROM community_feedback_topics "
+                "WHERE id = ? AND status != 'merged' AND deleted_at IS NULL",
+                (target_id,),
+            ).fetchone()
+            if target is None:
+                raise CommunityValidationError("not_found", "target feedback topic was not found")
+            placeholders = ",".join("?" for _ in source_ids)
+            rows = connection.execute(
+                f"SELECT id FROM community_feedback_topics WHERE id IN ({placeholders}) "
+                "AND status != 'merged' AND deleted_at IS NULL",
+                source_ids,
+            ).fetchall()
+            found = sorted(int(row["id"]) for row in rows)
+            if found != source_ids:
+                raise CommunityValidationError("not_found", "a source feedback topic was not found")
+            connection.execute(
+                f"UPDATE community_feedback_messages SET topic_id = ? "
+                f"WHERE topic_id IN ({placeholders})",
+                [target_id, *source_ids],
+            )
+            for source_id in source_ids:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO community_feedback_sources
+                        (topic_id, page, root_comment_id, snapshot_json, created_at)
+                    SELECT ?, page, root_comment_id, snapshot_json, created_at
+                    FROM community_feedback_sources WHERE topic_id = ?
+                    """,
+                    (target_id, source_id),
+                )
+            connection.execute(
+                f"DELETE FROM community_feedback_sources WHERE topic_id IN ({placeholders})",
+                source_ids,
+            )
+            connection.execute(
+                f"""
+                UPDATE community_feedback_topics
+                SET status = 'merged', merged_into_id = ?, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                [target_id, timestamp, *source_ids],
+            )
+            if title is not None:
+                connection.execute(
+                    "UPDATE community_feedback_topics SET title = ?, updated_at = ? WHERE id = ?",
+                    (_single_line(title, "title", 70, required=True), timestamp, target_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE community_feedback_topics SET updated_at = ? WHERE id = ?",
+                    (timestamp, target_id),
+                )
+            detail = json.dumps({"merged": source_ids}, ensure_ascii=False)
+            connection.execute(
+                """
+                INSERT INTO community_feedback_events
+                    (topic_id, event_type, detail, created_at)
+                VALUES (?, 'merged', ?, ?)
+                """,
+                (target_id, detail, timestamp),
+            )
+        return source_ids
+
+    def get_feedback_avatar(self, message_id: int) -> dict[str, str] | None:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT email, nickname FROM community_feedback_messages
+                WHERE id = ? AND status = 'published'
+                """,
+                (int(message_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"email": str(row["email"]), "nickname": str(row["nickname"])}
+
     def create_friend_application(
         self,
         submission: FriendApplicationSubmission,
         submitter_hash: str,
         *,
+        tracking_hash: str = "",
         now: datetime | None = None,
     ) -> dict[str, Any]:
         current = now or datetime.now(timezone.utc)
@@ -639,8 +1553,8 @@ class CommunityStore:
                 """
                 INSERT INTO friend_link_applications
                     (name, website, avatar, description, email, status,
-                     moderation_note, submitter_hash, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?)
+                     moderation_note, submitter_hash, tracking_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?)
                 """,
                 (
                     submission.name,
@@ -649,6 +1563,7 @@ class CommunityStore:
                     submission.description,
                     submission.email,
                     submitter_hash,
+                    tracking_hash,
                     timestamp,
                     timestamp,
                 ),
@@ -689,6 +1604,45 @@ class CommunityStore:
                 "avatar": str(row["avatar"]),
                 "description": str(row["description"]),
                 "email": str(row["email"]),
+                "status": str(row["status"]),
+                "moderation_note": str(row["moderation_note"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def list_friend_applications_by_tracking_hashes(
+        self, tracking_hashes: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        """Return only applications addressed by opaque visitor tracking tokens."""
+        normalized = [
+            value
+            for value in dict.fromkeys(str(item).strip() for item in tracking_hashes)
+            if value
+        ]
+        if not normalized:
+            return []
+        self.initialize()
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, name, website, avatar, description, status,
+                       moderation_note, created_at, updated_at
+                FROM friend_link_applications
+                WHERE tracking_hash IN ({placeholders})
+                ORDER BY id DESC
+                """,
+                normalized,
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "name": str(row["name"]),
+                "website": str(row["website"]),
+                "avatar": str(row["avatar"]),
+                "description": str(row["description"]),
                 "status": str(row["status"]),
                 "moderation_note": str(row["moderation_note"]),
                 "created_at": str(row["created_at"]),
