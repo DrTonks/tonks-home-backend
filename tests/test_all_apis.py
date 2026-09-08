@@ -192,6 +192,8 @@ class AllApiRoutesTest(unittest.TestCase):
             ("POST", "/blog/community/feedback/messages"),
             ("POST", "/blog/community/feedback/<int:topic_id>/messages"),
             ("PATCH", "/blog/community/feedback/<int:topic_id>"),
+            ("DELETE", "/blog/community/feedback/<int:topic_id>"),
+            ("PATCH", "/blog/community/comments/<int:comment_id>/pin"),
             ("POST", "/blog/community/feedback/from-comment"),
             ("POST", "/blog/community/feedback/merge"),
             ("GET", "/blog/community/friend-applications"),

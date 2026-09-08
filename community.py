@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -254,6 +256,27 @@ def validate_feedback_topic_payload(payload: Any) -> FeedbackTopicSubmission:
     )
 
 
+def _retention_expired(value: str | None, now: datetime) -> bool:
+    """Three UTC calendar months from deletion, clamping the target month end."""
+    if not value:
+        return False
+    try:
+        deleted = datetime.fromisoformat(value)
+        if deleted.tzinfo is None:
+            deleted = deleted.replace(tzinfo=timezone.utc)
+        deleted = deleted.astimezone(timezone.utc)
+        month_index = deleted.year * 12 + deleted.month - 1 + 3
+        year, month = divmod(month_index, 12)
+        month += 1
+        expires = deleted.replace(
+            year=year, month=month, day=min(deleted.day, monthrange(year, month)[1])
+        )
+        return expires <= now
+    except (ValueError, TypeError, OverflowError):
+        # Unknown timestamps must never cause premature deletion.
+        return False
+
+
 class CommunityStore:
     def __init__(self, database_path: str | None = None):
         self.database_path = database_path or default_community_database_path()
@@ -429,6 +452,14 @@ class CommunityStore:
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(community_comments)").fetchall()
             }
+            if "is_pinned" not in comment_columns:
+                try:
+                    connection.execute(
+                        "ALTER TABLE community_comments ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             if "is_admin" not in comment_columns:
                 try:
                     connection.execute(
@@ -455,6 +486,22 @@ class CommunityStore:
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
                         raise
+            if "deleted_at" not in comment_columns:
+                try:
+                    connection.execute("ALTER TABLE community_comments ADD COLUMN deleted_at TEXT")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS community_metadata "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "UPDATE community_comments SET deleted_at = ? "
+                "WHERE status = 'deleted' AND deleted_at IS NULL "
+                "AND moved_to_feedback_id IS NULL",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_community_comments_owner "
                 "ON community_comments(owner_hash, id) WHERE owner_hash != ''"
@@ -665,8 +712,8 @@ class CommunityStore:
                 """
                 INSERT INTO community_comments
                     (page, parent_id, root_id, actor_hash, owner_hash, nickname, email, website,
-                     content, status, moderation_reason, is_admin, created_at, created_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content, status, moderation_reason, is_admin, created_at, created_date, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     submission.page,
@@ -683,6 +730,7 @@ class CommunityStore:
                     1 if is_admin else 0,
                     created_at,
                     current.date().isoformat(),
+                    created_at if status == "deleted" else None,
                 ),
             )
             comment_id = int(cursor.lastrowid)
@@ -691,6 +739,7 @@ class CommunityStore:
                     "UPDATE community_comments SET root_id = ? WHERE id = ?",
                     (comment_id, comment_id),
                 )
+        self._purge_after_submission(current, status)
         return {
             "id": comment_id,
             "page": submission.page,
@@ -707,6 +756,103 @@ class CommunityStore:
             "reply_to_name": parent_context["nickname"] if parent_context else "",
         }
 
+    def _purge_after_submission(self, now: datetime, status: str) -> None:
+        """Best-effort housekeeping only after a new submission has committed."""
+        if status == "deleted":
+            return
+        try:
+            self._lazy_purge(now.astimezone(timezone.utc))
+        except Exception:
+            logging.getLogger(__name__).exception("Community lazy purge failed after submission commit")
+
+    def _lazy_purge(self, now: datetime) -> None:
+        # The accepted comment has already committed. Serialize the persisted daily
+        # claim and cleanup across processes; retain the claim even on cleanup error.
+        counts = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            day = now.date().isoformat()
+            previous = connection.execute(
+                "SELECT value FROM community_metadata WHERE key = 'last_purge_date'"
+            ).fetchone()
+            if previous and previous["value"] >= day:
+                return
+            connection.execute(
+                "INSERT INTO community_metadata(key, value) VALUES ('last_purge_date', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (day,)
+            )
+            connection.execute("SAVEPOINT lazy_purge")
+            try:
+                counts = self._purge_deleted_records(connection, now)
+            except Exception:
+                connection.execute("ROLLBACK TO lazy_purge")
+                logging.getLogger(__name__).exception("Community lazy purge rolled back")
+            finally:
+                connection.execute("RELEASE lazy_purge")
+
+        # Log only after commit, never report rolled-back deletions as successful.
+        if counts is not None:
+            logging.getLogger(__name__).info("Community lazy purge committed: counts=%s", counts)
+
+    def _purge_deleted_records(self, connection: sqlite3.Connection, now: datetime) -> dict[str, int]:
+        counts = {}
+        topics = connection.execute(
+            "SELECT id, merged_into_id, deleted_at FROM community_feedback_topics"
+        ).fetchall()
+        candidates = {row["id"] for row in topics if _retention_expired(row["deleted_at"], now)}
+        # moved_to_feedback_id is a logical reference even on older schemas without FK.
+        candidates.difference_update(row[0] for row in connection.execute(
+            "SELECT moved_to_feedback_id FROM community_comments WHERE moved_to_feedback_id IS NOT NULL"
+        ))
+        while True:
+            blocked = {row["merged_into_id"] for row in topics if row["id"] not in candidates}
+            remaining = candidates - blocked
+            if remaining == candidates:
+                break
+            candidates = remaining
+        connection.execute("CREATE TEMP TABLE purge_topics (id INTEGER PRIMARY KEY)")
+        connection.executemany("INSERT INTO purge_topics VALUES (?)", [(i,) for i in candidates])
+        for table in ("community_feedback_messages", "community_feedback_sources", "community_feedback_events"):
+            counts[table] = connection.execute(
+                f"DELETE FROM {table} WHERE topic_id IN (SELECT id FROM purge_topics)"
+            ).rowcount
+        counts["community_feedback_topics"] = connection.execute(
+            "DELETE FROM community_feedback_topics WHERE id IN (SELECT id FROM purge_topics)"
+        ).rowcount
+
+        rows = connection.execute(
+            "SELECT id, root_id, parent_id, status, deleted_at, moved_to_feedback_id FROM community_comments"
+        ).fetchall()
+        trees = defaultdict(list)
+        for row in rows:
+            trees[row["root_id"] or row["id"]].append(row)
+        protected = {row[0] for row in connection.execute(
+            "SELECT root_comment_id FROM community_feedback_sources"
+        )}
+        eligible = set()
+        for root_id, members in trees.items():
+            if any(row["id"] == root_id and row["parent_id"] is None for row in members) and all(
+                row["status"] == "deleted" and row["moved_to_feedback_id"] is None
+                and row["id"] not in protected and _retention_expired(row["deleted_at"], now)
+                for row in members
+            ):
+                eligible.update(row["id"] for row in members)
+        # Conservatively protect even inconsistent legacy cross-tree references.
+        while True:
+            referenced = {ref for row in rows if row["id"] not in eligible
+                          for ref in (row["parent_id"], row["root_id"])}
+            blocked_roots = {row["root_id"] or row["id"] for row in rows
+                             if row["id"] in eligible and row["id"] in referenced}
+            if not blocked_roots:
+                break
+            eligible.difference_update(row["id"] for root in blocked_roots for row in trees[root])
+        connection.execute("CREATE TEMP TABLE purge_comments (id INTEGER PRIMARY KEY)")
+        connection.executemany("INSERT INTO purge_comments VALUES (?)", [(i,) for i in eligible])
+        counts["community_comments"] = connection.execute(
+            "DELETE FROM community_comments WHERE id IN (SELECT id FROM purge_comments)"
+        ).rowcount
+        return counts
+
     def list_public_comments(
         self,
         page: str,
@@ -720,16 +866,28 @@ class CommunityStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
+                WITH RECURSIVE visible AS (
+                    SELECT * FROM community_comments
+                    WHERE page = ? AND status != 'deleted'
+                      AND (? OR status = 'published')
+                ), latest AS (
+                    SELECT id FROM visible ORDER BY id DESC LIMIT ?
+                ), selected(id) AS (
+                    SELECT id FROM latest
+                    UNION
+                    SELECT id FROM visible WHERE is_pinned = 1 AND status = 'published'
+                    UNION
+                    SELECT v.parent_id FROM visible v JOIN selected s ON v.id = s.id
+                    WHERE v.parent_id IS NOT NULL
+                )
                 SELECT c.id, c.page, c.parent_id, c.root_id, c.actor_hash, c.owner_hash,
                        c.nickname, c.email, c.website,
-                       c.content, c.status, c.is_admin, c.created_at,
+                       c.content, c.status, c.is_admin, c.is_pinned, c.created_at,
                        c.moderation_reason, parent.nickname AS reply_to_name
-                FROM community_comments AS c
-                LEFT JOIN community_comments AS parent ON parent.id = c.parent_id
-                WHERE c.page = ? AND c.status != 'deleted'
-                  AND (? OR c.status = 'published')
+                FROM visible AS c
+                LEFT JOIN visible AS parent ON parent.id = c.parent_id
+                WHERE c.id IN (SELECT id FROM selected)
                 ORDER BY c.id ASC
-                LIMIT ?
                 """,
                 (page, 1 if include_nonpublished else 0, max(1, min(500, int(limit)))),
             ).fetchall()
@@ -745,6 +903,7 @@ class CommunityStore:
                 "content": str(row["content"]),
                 "status": str(row["status"]),
                 "is_admin": bool(row["is_admin"]),
+                "is_pinned": bool(row["is_pinned"]) and row["status"] == "published",
                 "owned": bool(
                     viewer_owner_hash
                     and str(row["owner_hash"] or "") == viewer_owner_hash
@@ -758,6 +917,17 @@ class CommunityStore:
                 comment["moderation_reason"] = str(row["moderation_reason"] or "")
             comments.append(comment)
         return comments
+
+    def set_comment_pin(self, comment_id: int, pinned: bool) -> bool:
+        if not isinstance(pinned, bool):
+            raise CommunityValidationError("invalid_pin", "is_pinned must be a boolean")
+        self.initialize()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE community_comments SET is_pinned = ? WHERE id = ? AND status = 'published'",
+                (int(pinned), int(comment_id)),
+            )
+        return cursor.rowcount > 0
 
     def update_comment_status(
         self,
@@ -775,7 +945,7 @@ class CommunityStore:
             cursor = connection.execute(
                 """
                 UPDATE community_comments
-                SET status = ?, moderation_reason = ?
+                SET status = ?, moderation_reason = ?, is_pinned = 0
                 WHERE id = ? AND status != 'deleted'
                 """,
                 (status, reason, int(comment_id)),
@@ -795,7 +965,9 @@ class CommunityStore:
 
     def delete_comment(self, comment_id: int) -> list[int]:
         self.initialize()
+        timestamp = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
                 WITH RECURSIVE descendants(id) AS (
@@ -812,8 +984,11 @@ class CommunityStore:
             if ids:
                 placeholders = ",".join("?" for _ in ids)
                 connection.execute(
-                    f"UPDATE community_comments SET status = 'deleted' WHERE id IN ({placeholders})",
-                    ids,
+                    f"UPDATE community_comments SET status = 'deleted', is_pinned = 0, "
+                    "deleted_at = CASE WHEN moved_to_feedback_id IS NULL "
+                    "THEN COALESCE(deleted_at, ?) ELSE deleted_at END "
+                    f"WHERE id IN ({placeholders})",
+                    [timestamp, *ids],
                 )
         return ids
 
@@ -913,6 +1088,7 @@ class CommunityStore:
                 "SELECT * FROM community_feedback_room_messages WHERE id = ?",
                 (int(cursor.lastrowid),),
             ).fetchone()
+        self._purge_after_submission(current, status)
         return self._feedback_room_message_dict(
             row,
             viewer_owner_hash=owner_hash,
@@ -1018,6 +1194,7 @@ class CommunityStore:
                 """,
                 (topic_id, submission.kind, timestamp),
             )
+        self._purge_after_submission(current, status)
         return {
             "id": topic_id,
             "title": submission.title,
@@ -1083,6 +1260,7 @@ class CommunityStore:
                 "UPDATE community_feedback_topics SET updated_at = ? WHERE id = ?",
                 (timestamp, int(topic_id)),
             )
+        self._purge_after_submission(current, status)
         return {
             "id": int(cursor.lastrowid),
             "topic_id": int(topic_id),
@@ -1414,7 +1592,7 @@ class CommunityStore:
                 connection.execute(
                     f"""
                     UPDATE community_comments
-                    SET status = 'deleted', moved_to_feedback_id = ?
+                    SET status = 'deleted', is_pinned = 0, moved_to_feedback_id = ?
                     WHERE id IN ({placeholders})
                     """,
                     [int(topic_id), *moved_ids],

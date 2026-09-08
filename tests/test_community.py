@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import sqlite3
 import json
 from pathlib import Path
 import shutil
@@ -11,6 +13,7 @@ from unittest import mock
 
 from comment_moderation import CommentModerationService, ModerationResult
 from community import (
+    _retention_expired,
     CommunityBurstLimiter,
     CommunityRateLimitExceeded,
     CommunityStore,
@@ -85,6 +88,305 @@ class CommunityStoreTests(unittest.TestCase):
             **changes,
         }
         return validate_comment_payload(page, payload)
+
+    def purge_comment(self, **kwargs):
+        with mock.patch.object(self.store, "_lazy_purge"):
+            return self.store.create_comment(self.submission(), "purge-test", status="published", **kwargs)
+
+    def age_comments(self, ids, timestamp="2025-11-30T12:00:00+00:00"):
+        with self.store._connect() as connection:
+            connection.executemany(
+                "UPDATE community_comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
+                [(timestamp, i) for i in ids],
+            )
+
+    def comment_ids(self):
+        with self.store._connect() as connection:
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            return {row[0] for row in connection.execute("SELECT id FROM community_comments")}
+
+    def test_retention_calendar_boundaries(self):
+        for deleted, expires in [
+            ("2025-11-30T12:00:00+00:00", "2026-02-28T12:00:00+00:00"),
+            ("2023-11-30T12:00:00+00:00", "2024-02-29T12:00:00+00:00"),
+            ("2026-01-31T12:00:00+00:00", "2026-04-30T12:00:00+00:00"),
+            ("2026-02-28T12:00:00+00:00", "2026-05-28T12:00:00+00:00"),
+            ("2025-11-30T20:00:00+08:00", "2026-02-28T12:00:00+00:00"),
+        ]:
+            with self.subTest(deleted=deleted):
+                boundary = datetime.fromisoformat(expires)
+                self.assertFalse(_retention_expired(deleted, boundary - timedelta(microseconds=1)))
+                self.assertTrue(_retention_expired(deleted, boundary))
+        for value in (None, "", "bad-date", "9999-12-31T00:00:00+00:00"):
+            self.assertFalse(_retention_expired(value, datetime(2026, 9, 8, tzinfo=timezone.utc)))
+
+    def test_deleted_at_migration_starts_now_and_excludes_feedback(self):
+        old = self.purge_comment(now=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        moved = self.purge_comment()
+        topic = self.store.attach_comment_tree_to_feedback(moved["id"])
+        with self.store._connect() as connection:
+            connection.execute("UPDATE community_comments SET status = 'deleted' WHERE id = ?", (old["id"],))
+            connection.execute("ALTER TABLE community_comments DROP COLUMN deleted_at")
+        migration = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
+        with mock.patch("community.datetime", wraps=datetime) as clock:
+            clock.now.return_value = migration
+            self.store.initialize()
+            clock.now.return_value = migration + timedelta(days=10)
+            self.store.initialize()
+        with self.store._connect() as connection:
+            rows = {row["id"]: row for row in connection.execute("SELECT * FROM community_comments")}
+        self.assertEqual(rows[old["id"]]["deleted_at"], migration.isoformat())
+        self.assertIsNone(rows[moved["id"]]["deleted_at"])
+        self.assertEqual(rows[moved["id"]]["moved_to_feedback_id"], topic)
+
+    def test_delete_tree_timestamps_preserve_first_deletion(self):
+        root = self.purge_comment()
+        child = self.purge_comment(parent_context=self.store.get_parent_context("about", root["id"]))
+        first = datetime(2026, 1, 31, tzinfo=timezone.utc)
+        with mock.patch("community.datetime", wraps=datetime) as clock:
+            clock.now.return_value = first
+            self.store.delete_comment(child["id"])
+            clock.now.return_value = first + timedelta(days=2)
+            self.store.delete_comment(root["id"])
+        with self.store._connect() as connection:
+            rows = {row["id"]: row["deleted_at"] for row in connection.execute("SELECT * FROM community_comments")}
+        self.assertEqual(rows[child["id"]], first.isoformat())
+        self.assertEqual(rows[root["id"]], (first + timedelta(days=2)).isoformat())
+
+    def test_purge_only_entire_eligible_trees(self):
+        root = self.purge_comment()
+        child = self.purge_comment(parent_context=self.store.get_parent_context("about", root["id"]))
+        grandchild = self.purge_comment(parent_context=self.store.get_parent_context("about", child["id"]))
+        live = self.purge_comment()
+        partial = self.purge_comment(parent_context=self.store.get_parent_context("about", live["id"]))
+        self.age_comments([root["id"], child["id"], partial["id"]])
+        self.age_comments([grandchild["id"]], "2025-12-01T12:00:00+00:00")
+        self.store._lazy_purge(datetime(2026, 2, 28, 12, tzinfo=timezone.utc))
+        self.assertEqual(len(self.comment_ids()), 5)
+        self.store.create_comment(self.submission(), "trigger", status="published",
+                                  now=datetime(2026, 3, 1, 12, tzinfo=timezone.utc))
+        self.assertEqual(self.comment_ids() & {root["id"], child["id"], grandchild["id"]}, set())
+        self.assertTrue({live["id"], partial["id"]} <= self.comment_ids())
+
+    def test_feedback_sources_and_moved_comments_protected(self):
+        root = self.purge_comment()
+        topic = self.store.attach_comment_tree_to_feedback(root["id"])
+        self.store.delete_feedback_topic(topic)
+        self.age_comments([root["id"]])
+        with self.store._connect() as connection:
+            connection.execute("UPDATE community_feedback_topics SET deleted_at = '2025-01-01T00:00:00+00:00'")
+        self.store._lazy_purge(datetime(2026, 2, 28, tzinfo=timezone.utc))
+        self.assertIn(root["id"], self.comment_ids())
+        # A source reference protects a comment even without the logical moved flag.
+        with self.store._connect() as connection:
+            connection.execute("UPDATE community_comments SET moved_to_feedback_id = NULL")
+            connection.execute("UPDATE community_feedback_topics SET deleted_at = NULL")
+        self.store._lazy_purge(datetime(2026, 3, 1, tzinfo=timezone.utc))
+        self.assertIn(root["id"], self.comment_ids())
+
+    def test_feedback_purge_dependencies_and_incoming_merge_refs(self):
+        def topic():
+            return self.store.create_feedback_topic(validate_feedback_topic_payload({
+                "title": "Test", "kind": "bug", "nickname": "T",
+                "email": "t@example.com", "content": "Test",
+            }), "actor", status="published", now=datetime(2025, 1, 1, tzinfo=timezone.utc))["id"]
+        target, source, removable = topic(), topic(), topic()
+        root = self.purge_comment()
+        self.store.attach_comment_tree_to_feedback(root["id"], topic_id=removable)
+        self.store.merge_feedback_topics(target, [source])
+        self.store.delete_feedback_topic(target)
+        self.store.delete_feedback_topic(removable)
+        with self.store._connect() as connection:
+            connection.execute("UPDATE community_comments SET moved_to_feedback_id = NULL")
+            connection.execute("UPDATE community_feedback_topics SET deleted_at = '2025-11-30T12:00:00+00:00'")
+            connection.execute("UPDATE community_feedback_topics SET deleted_at = '2026-02-01T00:00:00+00:00' WHERE id = ?", (source,))
+        self.store._lazy_purge(datetime(2026, 2, 28, 12, tzinfo=timezone.utc))
+        with self.store._connect() as connection:
+            self.assertEqual({r[0] for r in connection.execute("SELECT id FROM community_feedback_topics")}, {target, source})
+            for table in ("community_feedback_messages", "community_feedback_sources", "community_feedback_events"):
+                self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table} WHERE topic_id = ?", (removable,)).fetchone()[0], 0)
+        self.store._lazy_purge(datetime(2026, 5, 1, tzinfo=timezone.utc))
+        with self.store._connect() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM community_feedback_topics").fetchone()[0], 0)
+        self.comment_ids()
+
+    def test_daily_gate_persists_and_uses_utc(self):
+        self.store.initialize()
+        with mock.patch.object(CommunityStore, "_purge_deleted_records") as purge:
+            for timestamp in ("2026-03-01T23:00:00+00:00", "2026-03-02T07:30:00+08:00",
+                              "2026-03-02T08:00:00+08:00"):
+                CommunityStore(self.store.database_path).create_comment(
+                    self.submission(), "trigger", status="pending", now=datetime.fromisoformat(timestamp))
+            self.assertEqual(purge.call_count, 2)
+        with self.store._connect() as connection:
+            self.assertEqual(connection.execute("SELECT value FROM community_metadata WHERE key = 'last_purge_date'").fetchone()[0], "2026-03-02")
+
+    def test_purge_failure_rolls_back_but_comment_and_daily_claim_commit(self):
+        old = self.purge_comment()
+        self.age_comments([old["id"]])
+        def fail(connection, now):
+            connection.execute("DELETE FROM community_comments WHERE id = ?", (old["id"],))
+            raise sqlite3.OperationalError("injected failure")
+        now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        with mock.patch.object(self.store, "_purge_deleted_records", side_effect=fail) as purge:
+            with self.assertLogs("community", level="ERROR"):
+                accepted = self.store.create_comment(self.submission(), "new", status="published", now=now)
+            self.store.create_comment(self.submission(), "second", status="published", now=now)
+            self.assertEqual(purge.call_count, 1)
+        self.assertTrue({old["id"], accepted["id"]} <= self.comment_ids())
+        with mock.patch.object(self.store, "_lazy_purge", side_effect=sqlite3.OperationalError("connection failed")):
+            with self.assertLogs("community", level="ERROR"):
+                accepted = self.store.create_comment(self.submission(), "third", status="published", now=now)
+        self.assertIn(accepted["id"], self.comment_ids())
+        self.store._lazy_purge(now + timedelta(days=1))
+        self.assertNotIn(old["id"], self.comment_ids())
+
+    def test_concurrent_comment_insertions_claim_one_purge(self):
+        self.store.initialize()
+        now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        def submit(_):
+            return CommunityStore(self.store.database_path).create_comment(
+                self.submission(), "parallel", status="published", now=now)["id"]
+        with mock.patch.object(CommunityStore, "_purge_deleted_records") as purge:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                ids = list(executor.map(submit, range(8)))
+            self.assertEqual(purge.call_count, 1)
+        self.assertEqual(len(set(ids)), 8)
+        self.assertEqual(self.comment_ids(), set(ids))
+
+    def test_failed_insert_and_reads_do_not_trigger_purge(self):
+        self.store.initialize()
+        with mock.patch.object(self.store, "_lazy_purge") as purge:
+            self.store.list_public_comments("about")
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.store.create_comment(self.submission(), "bad", status="published",
+                                          parent_context={"id": 999, "root_id": 999, "nickname": "missing"})
+            purge.assert_not_called()
+
+    def submit_purge_kind(self, kind, now, status="published"):
+        payload = {"title": "Private test title", "kind": "bug", "nickname": "Private name",
+                   "email": "private@example.com", "content": "Private message"}
+        if kind == "comment":
+            return self.store.create_comment(self.submission(), "actor", status=status, now=now)
+        if kind == "topic":
+            return self.store.create_feedback_topic(validate_feedback_topic_payload(payload),
+                                                    "actor", status=status, now=now)
+        if kind == "room":
+            return self.store.add_feedback_room_message(validate_feedback_message_payload(payload),
+                                                        "actor", status=status, now=now)
+        with mock.patch.object(self.store, "_purge_after_submission"):
+            topic = self.submit_purge_kind("topic", now)
+        return self.store.add_feedback_message(topic["id"], validate_feedback_message_payload(payload),
+                                                "actor", status=status, now=now)
+
+    def test_all_submission_kinds_trigger_real_purge(self):
+        for offset, kind in enumerate(("comment", "room", "reply", "topic")):
+            with self.subTest(kind=kind):
+                old = self.purge_comment()
+                self.age_comments([old["id"]])
+                self.submit_purge_kind(kind, datetime(2030, 1, 1 + offset, tzinfo=timezone.utc))
+                self.assertNotIn(old["id"], self.comment_ids())
+
+    def test_submission_kinds_share_daily_gate_and_skip_deleted(self):
+        self.store.initialize()
+        now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        with mock.patch.object(self.store, "_purge_deleted_records", return_value={}) as purge:
+            for kind in ("comment", "room", "reply", "topic"):
+                self.submit_purge_kind(kind, now, status="deleted")
+            purge.assert_not_called()
+            for kind in ("comment", "room", "reply", "topic"):
+                for status in ("published", "pending", "rejected"):
+                    self.submit_purge_kind(kind, now, status=status)
+            self.assertEqual(purge.call_count, 1)
+            self.submit_purge_kind("room", now + timedelta(days=1))
+            self.assertEqual(purge.call_count, 2)
+
+    def test_feedback_submission_failure_isolation_and_commit(self):
+        now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        for kind, table in (("room", "community_feedback_room_messages"),
+                            ("reply", "community_feedback_messages"),
+                            ("topic", "community_feedback_topics")):
+            with self.subTest(kind=kind):
+                with mock.patch.object(self.store, "_lazy_purge", side_effect=sqlite3.OperationalError("injected")):
+                    with self.assertLogs("community", level="ERROR"):
+                        accepted = self.submit_purge_kind(kind, now)
+                with self.store._connect() as connection:
+                    self.assertIsNotNone(connection.execute(
+                        f"SELECT id FROM {table} WHERE id = ?", (accepted["id"],)
+                    ).fetchone())
+        with mock.patch.object(self.store, "_lazy_purge") as purge:
+            with self.assertRaises(CommunityValidationError):
+                self.store.add_feedback_message(999999, validate_feedback_message_payload({
+                    "nickname": "T", "email": "t@example.com", "content": "test"
+                }), "actor", status="published", now=now)
+            purge.assert_not_called()
+
+    def test_purge_logs_exact_committed_counts_without_content(self):
+        with mock.patch.object(self.store, "_purge_after_submission"):
+            topic = self.submit_purge_kind("topic", datetime(2025, 1, 1, tzinfo=timezone.utc))
+        root = self.purge_comment()
+        self.store.attach_comment_tree_to_feedback(root["id"], topic_id=topic["id"])
+        self.store.delete_feedback_topic(topic["id"])
+        self.age_comments([root["id"]])
+        with self.store._connect() as connection:
+            connection.execute("UPDATE community_comments SET moved_to_feedback_id = NULL")
+            connection.execute("UPDATE community_feedback_topics SET deleted_at = '2025-01-01T00:00:00+00:00'")
+        now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        with self.assertLogs("community", level="INFO") as logs:
+            self.submit_purge_kind("room", now)
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].args, {
+            "community_comments": 1, "community_feedback_topics": 1,
+            "community_feedback_messages": 1, "community_feedback_sources": 1,
+            "community_feedback_events": 3,
+        })
+        self.assertNotIn("Private", logs.output[0])
+        self.assertNotIn("@", logs.output[0])
+        with self.assertNoLogs("community", level="INFO"):
+            self.submit_purge_kind("room", now)
+        with self.assertLogs("community", level="INFO") as logs:
+            self.submit_purge_kind("room", now + timedelta(days=1))
+        self.assertEqual(set(logs.records[0].args.values()), {0})
+        real_purge = self.store._purge_deleted_records
+        def fail(connection, timestamp):
+            real_purge(connection, timestamp)
+            raise sqlite3.OperationalError("rollback")
+        with mock.patch.object(self.store, "_purge_deleted_records", side_effect=fail):
+            with self.assertLogs("community", level="INFO") as logs:
+                self.submit_purge_kind("room", now + timedelta(days=2))
+        self.assertEqual([record.levelname for record in logs.records], ["ERROR"])
+
+    def test_pin_visibility_moderation_and_deletion(self):
+        comment = self.store.create_comment(self.submission(), "a", status="published")
+        pending = self.store.create_comment(self.submission(), "b", status="pending")
+        self.assertFalse(self.store.set_comment_pin(pending["id"], True))
+        with self.assertRaises(CommunityValidationError):
+            self.store.set_comment_pin(comment["id"], "false")
+        self.assertTrue(self.store.set_comment_pin(comment["id"], True))
+        self.assertTrue(self.store.list_public_comments("about")[0]["is_pinned"])
+        self.store.update_comment_status(comment["id"], "rejected")
+        self.store.update_comment_status(comment["id"], "published")
+        self.assertFalse(self.store.list_public_comments("about")[0]["is_pinned"])
+        self.store.set_comment_pin(comment["id"], True)
+        self.store.delete_comment(comment["id"])
+        self.assertEqual(self.store.list_public_comments("about"), [])
+        self.assertFalse(self.store.set_comment_pin(comment["id"], True))
+
+    def test_latest_window_keeps_pins_and_reply_ancestors(self):
+        root = self.store.create_comment(self.submission(), "a", status="published")
+        pinned = self.store.create_comment(self.submission(), "b", status="published")
+        self.store.set_comment_pin(pinned["id"], True)
+        self.store.create_comment(self.submission(), "c", status="published")
+        reply = self.store.create_comment(
+            self.submission(parent_id=root["id"]), "d", status="published",
+            parent_context=self.store.get_parent_context("about", root["id"]),
+        )
+        rows = self.store.list_public_comments("about", limit=1)
+        self.assertEqual([row["id"] for row in rows], [root["id"], pinned["id"], reply["id"]])
+        self.assertEqual(self.store.list_public_comments("friends", limit=1), [])
+        self.store.set_comment_pin(pinned["id"], False)
+        self.assertEqual([row["id"] for row in self.store.list_public_comments("about", limit=1)],
+                         [root["id"], reply["id"]])
 
     def test_like_toggle_is_unique_per_target_and_identity(self):
         self.assertEqual(self.store.toggle_like("page:about", "visitor-a"), (1, True))
@@ -402,6 +704,23 @@ class CommunityRouteTests(unittest.TestCase):
         for patcher in reversed(self.patches):
             patcher.stop()
         shutil.rmtree(self.temporary_directory)
+
+    def test_pin_route_requires_admin_and_boolean(self):
+        comment = self.store.create_comment(CommunityStoreTests.submission(), "a", status="published")
+        url = f"/blog/community/comments/{comment['id']}/pin"
+        with mock.patch.object(self.server, "verify_admin_secret", return_value=False):
+            self.assertEqual(self.client.patch(url, json={"is_pinned": True}).status_code, 401)
+        with mock.patch.object(self.server, "verify_admin_secret", return_value=True):
+            headers = {"X-Admin-Secret": "test-admin"}
+            self.assertEqual(self.client.patch(url, headers=headers, json={"is_pinned": "false"}).status_code, 400)
+            response = self.client.patch(url, headers=headers, json={"is_pinned": True})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["is_pinned"])
+            public = self.client.get("/blog/community/comments/about").get_json()["comments"]
+            self.assertTrue(public[0]["is_pinned"])
+            self.assertEqual(self.client.patch(url, headers=headers, json={"is_pinned": False}).status_code, 200)
+            self.assertEqual(self.client.patch("/blog/community/comments/999999/pin", headers=headers,
+                                               json={"is_pinned": True}).status_code, 404)
 
     def test_like_and_comment_public_contract(self):
         liked = self.client.post(

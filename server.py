@@ -5,6 +5,10 @@ from runtime_env import configured_value, load_env_file, migrate_sensitive_data_
 
 load_env_file(os.environ.get('SLEEPY_ENV_FILE') or None)
 
+from runtime_logging import configure_community_logging
+
+configure_community_logging()
+
 import utils as u
 from datetime import datetime, timedelta, timezone
 from data import data as data_init
@@ -2055,6 +2059,21 @@ def blog_community_comments(page):
             else '评论已提交，等待人工确认'
         ),
     })
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/blog/community/comments/<int:comment_id>/pin', methods=['PATCH'])
+def pin_blog_community_comment(comment_id):
+    auth_err = require_admin()
+    if auth_err:
+        return auth_err, 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get('is_pinned'), bool):
+        return reterr(code='invalid_pin', message='is_pinned must be a boolean'), 400
+    if not community_store.set_comment_pin(comment_id, payload['is_pinned']):
+        return reterr(code='not found', message='published comment not found'), 404
+    response = u.format_dict({'success': True, 'comment_id': comment_id, 'is_pinned': payload['is_pinned']})
     response.headers['Cache-Control'] = 'no-store'
     return response
 
