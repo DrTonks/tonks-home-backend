@@ -1143,11 +1143,23 @@ class AllApiRoutesTest(unittest.TestCase):
 
     def test_image_route(self):
         response = self.client.get("/images/projects/calculator.png")
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.mimetype.startswith("image/"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers['Location'], 'https://blog.test/images/projects/calculator.png')
         response.close()
-        missing = self.json(self.client.get("/images/projects/missing.png"))
-        self.assertFalse(missing["success"])
+        missing = self.client.get("/images/projects/missing.png")
+        self.assertEqual(missing.status_code, 302)  # Blog now owns existence checks.
+        self.assertEqual(self.client.get('/images/projects/%252e%252e/secret').status_code, 404)
+
+    def test_blog_extra_uses_blog_images_without_local_copies(self):
+        project = {'startDate': '2026-01-01', 'image': '/images/projects/new-only-in-blog.png'}
+        timeline = {'startDate': '2026-01-02', 'image': ['/images/projects/other.JPG']}
+        responses = [io.BytesIO(json.dumps([project]).encode()), io.BytesIO(json.dumps([timeline]).encode())]
+        with mock.patch.object(backend.urllib.request, 'urlopen', side_effect=responses) as request:
+            result = backend.fetch_blog_extra()
+        self.assertEqual(request.call_count, 2)  # Only JSON requests; no image requests.
+        self.assertEqual(result['featuredProject']['image'], 'https://blog.test/images/projects/new-only-in-blog.png')
+        self.assertEqual(result['featuredProject']['images'], [result['featuredProject']['image']])
+        self.assertEqual(result['featuredTimeline']['image'], result['featuredTimeline']['images'])
 
     def test_music_routes_full_lifecycle(self):
         upload = self.json(

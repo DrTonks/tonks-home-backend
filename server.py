@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 # coding: utf-8
 import os
+from blog_images import blog_image_url, normalize_blog_images
 from runtime_env import configured_value, load_env_file, migrate_sensitive_data_keys
 
 load_env_file(os.environ.get('SLEEPY_ENV_FILE') or None)
@@ -942,19 +943,12 @@ def fetch_blog_rss(count=2):
 
 
 def _blog_image_path(blog_path):
-    """将博客图片路径转为本地图片 URL 路径，并校验文件存在"""
-    if not blog_path or not isinstance(blog_path, str):
-        return None
-    # 博客图片路径格式: /images/projects/xxx.png — 去掉 /images/ 前缀后拼到本地 IMAGES_DIR
-    p = blog_path.lstrip('/')
-    if p.startswith('images/'):
-        p = p[len('images/'):]
-    safe = os.path.normpath(p)
-    if safe.startswith('..') or os.path.isabs(safe):
-        return None
-    if os.path.isfile(os.path.join(IMAGES_DIR, safe)):
-        return f'/images/{safe.replace(os.sep, "/")}'
-    return None
+    """Return the blog URL without local copies or per-image network requests."""
+    return blog_image_url(blog_path, _blog_image_base())
+
+
+def _blog_image_base():
+    return os.environ.get('SLEEPY_BLOG_BASE_URL', d.data.get('blog_base_url', 'https://blog.tonks.top'))
 
 
 def _extract_links(entry, entry_type='project'):
@@ -1010,9 +1004,8 @@ def fetch_blog_extra():
             projects = json.loads(resp.read().decode('utf-8'))
             if isinstance(projects, list) and len(projects) > 0:
                 projects.sort(key=lambda x: x.get('startDate', ''), reverse=True)
-                p = projects[0]
+                p = normalize_blog_images(projects[0], _blog_image_base())
                 p['links'] = _extract_links(p, 'project')
-                p['images'] = _extract_images(p)
                 result['featuredProject'] = p
     except Exception as e:
         u.error(f'Blog projects fetch failed: {e}')
@@ -1025,9 +1018,8 @@ def fetch_blog_extra():
             timeline = json.loads(resp.read().decode('utf-8'))
             if isinstance(timeline, list) and len(timeline) > 0:
                 timeline.sort(key=lambda x: x.get('startDate', ''), reverse=True)
-                t = timeline[0]
+                t = normalize_blog_images(timeline[0], _blog_image_base())
                 t['links'] = _extract_links(t, 'timeline')
-                t['images'] = _extract_images(t)
                 result['featuredTimeline'] = t
     except Exception as e:
         u.error(f'Blog timeline fetch failed: {e}')
@@ -2539,6 +2531,13 @@ def update_blog_friend_application(application_id):
 @app.route('/images/<path:filename>')
 def serve_image(filename):
     """提供博客项目/时光机图片"""
+    if filename.startswith('projects/'):
+        target = _blog_image_path('/images/' + filename)
+        if not target:
+            return reterr(code='not found', message='image not found'), 404
+        response = redirect(target, code=302)
+        response.headers['Cache-Control'] = 'public, max-age=300'
+        return response
     # 安全检查：防止目录遍历
     safe_path = os.path.normpath(filename)
     if safe_path.startswith('..') or os.path.isabs(safe_path):
