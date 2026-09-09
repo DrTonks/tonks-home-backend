@@ -2532,6 +2532,8 @@ def update_blog_friend_application(application_id):
 def serve_image(filename):
     """提供博客项目/时光机图片"""
     if filename.startswith('projects/'):
+        # Preserve the known legacy filename; other paths keep their exact case.
+        filename = {'projects/jxj.JPG': 'projects/jxj.jpg'}.get(filename, filename)
         target = _blog_image_path('/images/' + filename)
         if not target:
             return reterr(code='not found', message='image not found'), 404

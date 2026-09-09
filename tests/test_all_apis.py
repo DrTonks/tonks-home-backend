@@ -1150,6 +1150,28 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 302)  # Blog now owns existence checks.
         self.assertEqual(self.client.get('/images/projects/%252e%252e/secret').status_code, 404)
 
+    def test_image_route_preserves_known_legacy_alias_without_case_guessing(self):
+        cases = {
+            'jxj.JPG': 'jxj.jpg',
+            'jxj.jpg': 'jxj.jpg',
+            'JXJ.JPG': 'JXJ.JPG',
+            'other.JPG': 'other.JPG',
+        }
+        with mock.patch.object(backend.urllib.request, 'urlopen') as request:
+            for source, target in cases.items():
+                with self.subTest(source=source):
+                    response = self.client.get('/images/projects/' + source)
+                    try:
+                        self.assertEqual(response.status_code, 302)
+                        self.assertEqual(
+                            response.headers['Location'],
+                            'https://blog.test/images/projects/' + target,
+                        )
+                        self.assertEqual(response.headers['Cache-Control'], 'public, max-age=300')
+                    finally:
+                        response.close()
+            request.assert_not_called()
+
     def test_blog_extra_uses_blog_images_without_local_copies(self):
         project = {'startDate': '2026-01-01', 'image': '/images/projects/new-only-in-blog.png'}
         timeline = {'startDate': '2026-01-02', 'image': ['/images/projects/other.JPG']}
