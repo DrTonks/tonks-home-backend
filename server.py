@@ -3152,6 +3152,9 @@ def todos():
     return u.format_dict({'success': True, 'todos': cleaned})
 
 
+from article_comments import register_article_comments
+register_article_comments(app, globals())
+
 if __name__ == '__main__':
     from waitress import serve
 
