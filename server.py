@@ -900,7 +900,8 @@ def fetch_blog_rss(count=2):
                         'title': title,
                         'link': link,
                         'date': date_str,
-                        'summary': summary
+                        'summary': summary,
+                        'category': next((el.get('term', '').strip() for el in atom_findall(entry, 'category') if el.get('term', '').strip()), '')
                     })
 
             if posts:
@@ -934,7 +935,8 @@ def fetch_blog_rss(count=2):
                         'title': title,
                         'link': link,
                         'date': date_str,
-                        'summary': desc[:500] if desc else ''
+                        'summary': desc[:500] if desc else '',
+                        'category': (item.findtext('category') or '').strip()
                     })
     except Exception as e:
         u.error(f'RSS feed fetch failed: {e}')
@@ -1633,6 +1635,36 @@ def agent_activity():
 
 # === 博客文章 ===
 
+def enrich_blog_post_stats(posts):
+    """Use the same local counters as the blog, without per-article HTTP requests."""
+    enriched = [{**post, 'category': post.get('category', ''),
+                 'stats': dict.fromkeys(('views', 'likes', 'comments'), None)} for post in posts]
+    by_slug = {}
+    for post in enriched:
+        path = urllib.parse.unquote(urllib.parse.urlsplit(post.get('link', '')).path)
+        if path.startswith('/posts/'):
+            slug = normalize_blog_slug(path[len('/posts/'):])
+            if slug:
+                by_slug.setdefault(slug, []).append(post)
+    if not by_slug:
+        return enriched
+    readers = {
+        'views': lambda: blog_analytics.get_views(by_slug),
+        'likes': lambda: {key[5:]: value['count'] for key, value in
+                          community_store.get_likes([f'post:{slug}' for slug in by_slug], '').items()},
+        'comments': lambda: app.extensions['article_comments'].get_public_totals_by_slug(by_slug),
+    }
+    for metric, read in readers.items():
+        try:
+            totals = read()
+            for slug, items in by_slug.items():
+                for post in items:
+                    post['stats'][metric] = totals.get(slug)
+        except Exception as exc:
+            u.error(f'Blog {metric} totals unavailable: {exc}')
+    return enriched
+
+
 @app.route('/blog-posts')
 def blog_posts():
     """获取最新博客文章"""
@@ -1643,7 +1675,7 @@ def blog_posts():
         count = 2
     count = max(1, min(count, 20))  # 限制 1-20
 
-    posts = fetch_blog_rss(count=count)
+    posts = enrich_blog_post_stats(fetch_blog_rss(count=count))
     extra = fetch_blog_extra()
     return u.format_dict({
         'success': True,
@@ -1738,7 +1770,7 @@ def blog_site_visits():
 
 def community_avatar_svg(email):
     """Create a deterministic local fallback avatar without exposing the email."""
-    digest = hashlib.sha256(str(email).encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(str(email or '').strip().casefold().encode('utf-8')).hexdigest()
     color_a = f'#{digest[0:6]}'
     color_b = f'#{digest[6:12]}'
     color_c = f'#{digest[12:18]}'
@@ -1797,9 +1829,7 @@ def blog_community_avatar_preview():
     if qq_number:
         avatar_url = community_qq_avatar_url(qq_number)
     else:
-        normalized = email.strip().casefold()
-        email_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
-        avatar_url = f'https://www.gravatar.com/avatar/{email_hash}?s=96&d=identicon'
+        avatar_url = 'data:image/svg+xml,' + urllib.parse.quote(community_avatar_svg(email), safe='')
     response = u.format_dict({'success': True, 'avatar_url': avatar_url})
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -1807,31 +1837,20 @@ def blog_community_avatar_preview():
 
 @app.route('/blog/community/avatar/<int:comment_id>')
 def blog_community_avatar(comment_id):
-    """Try QQ avatars first, then Gravatar, then a private local SVG fallback."""
+    """Use QQ avatars for numeric QQ mailboxes, otherwise a private local SVG."""
     avatar = community_store.get_comment_avatar(comment_id)
     if avatar is None:
         return reterr(code='not found', message='avatar not found'), 404
 
     fallback = request.args.get('fallback', '')
     qq_number = community_qq_number(avatar['email'])
-    if fallback == '2':
-        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
-        response.headers['Cache-Control'] = 'public, max-age=86400'
-        response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-
-    if qq_number and fallback != '1':
+    if qq_number and not fallback:
         response = redirect(community_qq_avatar_url(qq_number), code=302)
-    elif fallback == '1' and qq_number:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    elif fallback == '1':
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+    else:
         response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
         response.headers['Cache-Control'] = 'public, max-age=86400'
         response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-    else:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    response.headers['Cache-Control'] = 'public, max-age=3600'
     return response
 
 
@@ -1843,23 +1862,13 @@ def blog_feedback_avatar(message_id):
         return reterr(code='not found', message='avatar not found'), 404
     fallback = request.args.get('fallback', '')
     qq_number = community_qq_number(avatar['email'])
-    if fallback == '2':
-        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
-        response.headers['Cache-Control'] = 'public, max-age=86400'
-        response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-    if qq_number and fallback != '1':
+    if qq_number and not fallback:
         response = redirect(community_qq_avatar_url(qq_number), code=302)
-    elif fallback == '1' and qq_number:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    elif fallback == '1':
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+    else:
         response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
         response.headers['Cache-Control'] = 'public, max-age=86400'
         response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-    else:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    response.headers['Cache-Control'] = 'public, max-age=3600'
     return response
 
 
@@ -1871,23 +1880,13 @@ def blog_feedback_room_avatar(message_id):
         return reterr(code='not found', message='avatar not found'), 404
     fallback = request.args.get('fallback', '')
     qq_number = community_qq_number(avatar['email'])
-    if fallback == '2':
-        response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
-        response.headers['Cache-Control'] = 'public, max-age=86400'
-        response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-    if qq_number and fallback != '1':
+    if qq_number and not fallback:
         response = redirect(community_qq_avatar_url(qq_number), code=302)
-    elif fallback == '1' and qq_number:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    elif fallback == '1':
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+    else:
         response = Response(community_avatar_svg(avatar['email']), mimetype='image/svg+xml')
         response.headers['Cache-Control'] = 'public, max-age=86400'
         response.headers['Content-Security-Policy'] = "default-src 'none'"
-        return response
-    else:
-        response = redirect(community_gravatar_url(avatar['email']), code=302)
-    response.headers['Cache-Control'] = 'public, max-age=3600'
     return response
 
 @app.route('/blog/community/likes', methods=['GET'])

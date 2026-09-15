@@ -76,7 +76,7 @@ class ArticleCommentStore:
                 """)
             self._ready = True
 
-    def article(self, article_id):
+    def _load_articles(self):
         path = Path(self.manifest_path or os.environ.get('SLEEPY_ARTICLE_MANIFEST',
                     str(Path(__file__).with_name('article-comments-manifest.json'))))
         try:
@@ -88,12 +88,33 @@ class ArticleCommentStore:
                         raise ValueError('unsupported manifest')
                     self._articles = {a['id']: a for a in payload['articles']}
                     self._manifest_stamp = stamp
-                article = self._articles.get(article_id)
+                return dict(self._articles)
         except (OSError, ValueError, KeyError, TypeError):
             raise CommunityValidationError('unavailable', '文章评论尚未配置，请稍后再试')
+
+    def article(self, article_id):
+        article = self._load_articles().get(article_id)
         if not article or article.get('draft') or article.get('encrypted'):
             raise CommunityValidationError('not_found', '这篇文章尚未开放评论')
         return article
+
+    def get_public_totals_by_slug(self, slugs):
+        """One indexed aggregate for all requested public articles; unknowns stay unavailable."""
+        wanted = set(slugs)
+        articles = {a['slug']: a['id'] for a in self._load_articles().values()
+                    if a.get('slug') in wanted and not a.get('draft') and not a.get('encrypted')}
+        result = dict.fromkeys(wanted, None)
+        if not articles:
+            return result
+        self.initialize()
+        placeholders = ','.join('?' for _ in articles)
+        with self.community._connect() as db:
+            rows = db.execute(
+                f"SELECT article_id,COUNT(*) n FROM article_comments WHERE status='published' "
+                f"AND article_id IN ({placeholders}) GROUP BY article_id", list(articles.values()))
+            totals = {row['article_id']: row['n'] for row in rows}
+        result.update({slug: totals.get(ident, 0) for slug, ident in articles.items()})
+        return result
 
     def context(self, article_id, payload):
         article = self.article(article_id)
@@ -154,7 +175,7 @@ class ArticleCommentStore:
     def listing(self, article_id, block=None, before=0, root=0, after=0, owner='', admin=False):
         self.article(article_id)
         self.initialize()
-        visible = "status IN ('published','pending','rejected','deleted')" if admin else "status IN ('published','deleted')"
+        visible = "status IN ('published','pending','rejected')" if admin else "status='published'"
         with self.community._connect() as db:
             counts = {r['block_id'] or '': r['n'] for r in db.execute(
                 "SELECT block_id,COUNT(*) n FROM article_comments WHERE article_id=? AND status='published' GROUP BY block_id", (article_id,))}
@@ -314,11 +335,11 @@ def register_article_comments(app, services):
         if not row:
             return '', 404
         email = row['email']
-        if request.args.get('fallback'):
+        qq = services['community_qq_number'](email)
+        if request.args.get('fallback') or not qq:
             response = Response(services['community_avatar_svg'](email), mimetype='image/svg+xml')
             response.headers['Content-Security-Policy'] = "default-src 'none'"
         else:
-            qq = services['community_qq_number'](email)
-            response = redirect(services['community_qq_avatar_url'](qq) if qq else services['community_gravatar_url'](email))
+            response = redirect(services['community_qq_avatar_url'](qq))
         response.headers['Cache-Control'] = 'public, max-age=3600'
         return response

@@ -936,6 +936,33 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(day6["sessionCount"], 5)
         self.assertEqual(day6["toolCallCount"], 13)
 
+    def test_blog_post_stats_batch_and_partial_failure(self):
+        posts = [{'link': 'https://blog.test/posts/nested/test/', 'title': 'A'},
+                 {'link': 'https://blog.test/posts/unseen/', 'title': 'B'},
+                 {'link': 'https://blog.test/about/', 'title': 'Other'}]
+        with (mock.patch.object(backend.blog_analytics, 'get_views', return_value={'nested/test': 9, 'unseen': 0}) as views,
+              mock.patch.object(backend.community_store, 'get_likes', return_value={'post:nested/test': {'count': 3}, 'post:unseen': {'count': 0}}) as likes,
+              mock.patch.object(backend.app.extensions['article_comments'], 'get_public_totals_by_slug', return_value={'nested/test': 2, 'unseen': None}) as comments):
+            result = backend.enrich_blog_post_stats(posts)
+        self.assertEqual(result[0]['stats'], {'views': 9, 'likes': 3, 'comments': 2})
+        self.assertEqual(result[1]['stats'], {'views': 0, 'likes': 0, 'comments': None})
+        self.assertEqual(result[2]['stats'], {'views': None, 'likes': None, 'comments': None})
+        self.assertNotIn('stats', posts[0])
+        self.assertEqual((views.call_count, likes.call_count, comments.call_count), (1, 1, 1))
+        with (mock.patch.object(backend.blog_analytics, 'get_views', side_effect=RuntimeError('offline')),
+              mock.patch.object(backend.community_store, 'get_likes', return_value={'post:nested/test': {'count': 3}}),
+              mock.patch.object(backend.app.extensions['article_comments'], 'get_public_totals_by_slug', return_value={'nested/test': 2})):
+            result = backend.enrich_blog_post_stats(posts[:1])
+        self.assertEqual(result[0]['stats'], {'views': None, 'likes': 3, 'comments': 2})
+
+    def test_blog_feed_category_atom_and_rss(self):
+        atom = b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>A</title><link href="https://blog.test/posts/a/"/><category term="Code"/></entry></feed>'
+        with mock.patch.object(backend.urllib.request, 'urlopen', return_value=io.BytesIO(atom)):
+            self.assertEqual(backend.fetch_blog_rss()[0]['category'], 'Code')
+        rss = b'<rss><channel><item><title>A</title><link>https://blog.test/posts/a/</link><category>Notes</category></item></channel></rss>'
+        with mock.patch.object(backend.urllib.request, 'urlopen', side_effect=[OSError('no atom'), io.BytesIO(rss)]):
+            self.assertEqual(backend.fetch_blog_rss()[0]['category'], 'Notes')
+
     def test_blog_posts_and_article_views(self):
         posts = [
             {
@@ -1061,10 +1088,28 @@ class AllApiRoutesTest(unittest.TestCase):
             primary.headers["Location"],
             "https://q1.qlogo.cn/g?b=qq&nk=3064517736&s=640",
         )
-        self.assertEqual(gravatar.status_code, 302)
-        self.assertIn("https://www.gravatar.com/avatar/", gravatar.headers["Location"])
+        self.assertEqual(gravatar.status_code, 200)
+        self.assertEqual(gravatar.mimetype, "image/svg+xml")
         self.assertEqual(local.status_code, 200)
         self.assertEqual(local.mimetype, "image/svg+xml")
+
+    def test_non_qq_avatars_are_local_and_match_preview(self):
+        import urllib.parse
+        email = 'visitor@example.com'
+        preview = self.json(self.client.post('/blog/community/avatar-preview', json={'email': email}))
+        svg = urllib.parse.unquote(preview['avatar_url'].split(',', 1)[1])
+        self.assertNotIn(email, svg)
+        self.assertEqual(svg, backend.community_avatar_svg(' VISITOR@EXAMPLE.COM '))
+        for route, getter in [('/blog/community/avatar/8', 'get_comment_avatar'),
+                              ('/blog/community/feedback/avatar/8', 'get_feedback_avatar'),
+                              ('/blog/community/feedback/room-avatar/8', 'get_feedback_room_avatar')]:
+            with self.subTest(route=route), mock.patch.object(backend.community_store, getter, return_value={'email': email}):
+                for suffix in ['', '?fallback=1', '?fallback=2']:
+                    response = self.client.get(route + suffix)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.mimetype, 'image/svg+xml')
+                    self.assertEqual(response.get_data(as_text=True), svg)
+                    self.assertNotIn('Location', response.headers)
 
     def test_blog_community_avatar_preview_uses_private_email_derivation(self):
         qq = self.json(
@@ -1090,7 +1135,7 @@ class AllApiRoutesTest(unittest.TestCase):
             "https://q1.qlogo.cn/g?b=qq&nk=3064517736&s=640",
         )
         self.assertTrue(gravatar["success"])
-        self.assertIn("https://www.gravatar.com/avatar/", gravatar["avatar_url"])
+        self.assertTrue(gravatar["avatar_url"].startswith("data:image/svg+xml,"))
         self.assertNotIn("visitor@example.com", gravatar["avatar_url"])
         self.assertEqual(invalid.status_code, 400)
 
