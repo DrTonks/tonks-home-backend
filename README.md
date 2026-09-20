@@ -1,3 +1,5 @@
+> 管理员邮件通知：[配置、事件范围与运维](docs/EMAIL_NOTIFICATIONS.md)
+
 > 开发导航：[项目地图](docs/PROJECT_MAP.md) · [部署与回退](docs/DEPLOYMENT.md) · [本地验收](docs/REFACTOR_VALIDATION.md)
 
 # Personal Status Server

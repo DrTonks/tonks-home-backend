@@ -22,6 +22,7 @@
 | `sleepy_app/app.py` | 应用工厂、原有路由注册、请求钩子及段评依赖装配 |
 | `sleepy_app/config.py` | 统一绝对数据路径；环境变量覆盖 |
 | `sleepy_app/runtime.py` | 创建服务、存储、进程内缓存、锁、限流器 |
+| `sleepy_app/notifications/` | 新增管理员邮件事件队列、模板、Resend投递及独立worker；详见 EMAIL_NOTIFICATIONS.md |
 | `sleepy_app/common/` | 身份校验、响应、环境、日志、代理和 JSON 存储 |
 | `sleepy_app/community/` | 普通评论、段评、反馈、友链申请、审核、头像与互动存储 |
 | `sleepy_app/blog/` | 博客文章聚合、浏览统计、Agent 活动存储、图片工具 |

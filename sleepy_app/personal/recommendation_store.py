@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from sleepy_app.config import PROJECT_ROOT
+from sleepy_app.notifications.outbox import enqueue
 
 from collections import defaultdict, deque
 from contextlib import contextmanager
@@ -268,6 +269,11 @@ class RecommendationStore:
                     """,
                     (cursor.lastrowid,),
                 ).fetchone()
+                enqueue(connection, kind="recommendation", entity_id=row["id"],
+                        payload={"source": "主页", "page": "recommendations", "title": category,
+                                 "nickname": user_name, "content": content, "status": "published",
+                                 "reason": "", "url": "https://tonks.top/", "quote": "",
+                                 "created_at": created_at})
                 connection.execute(
                     "DELETE FROM recommendation_daily_limits WHERE created_date < ?",
                     ((current.date() - timedelta(days=2)).isoformat(),),

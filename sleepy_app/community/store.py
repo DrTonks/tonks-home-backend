@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from sleepy_app.config import PROJECT_ROOT
+from sleepy_app.notifications.outbox import enqueue
 
 from calendar import monthrange
 from collections import defaultdict, deque
@@ -740,6 +741,13 @@ class CommunityStore:
                     "UPDATE community_comments SET root_id = ? WHERE id = ?",
                     (comment_id, comment_id),
                 )
+            enqueue(connection, kind="comment", entity_id=comment_id, is_admin=is_admin,
+                    payload={"source": "博客/主页", "page": submission.page,
+                             "title": "关于本站" if submission.page == "about" else "友链留言",
+                             "nickname": submission.nickname, "content": submission.content,
+                             "status": status, "reason": moderation_reason[:300],
+                             "url": f"https://blog.tonks.top/{submission.page}/",
+                             "quote": "", "created_at": created_at})
         self._purge_after_submission(current, status)
         return {
             "id": comment_id,
@@ -1089,6 +1097,11 @@ class CommunityStore:
                 "SELECT * FROM community_feedback_room_messages WHERE id = ?",
                 (int(cursor.lastrowid),),
             ).fetchone()
+            enqueue(connection, kind="feedback", entity_id=f"room:{row['id']}", is_admin=is_admin,
+                    payload={"source": "主页", "page": "feedback", "title": "反馈群聊",
+                             "nickname": submission.nickname, "content": submission.content,
+                             "status": status, "reason": moderation_reason[:300],
+                             "url": "https://tonks.top/", "quote": "", "created_at": timestamp})
         self._purge_after_submission(current, status)
         return self._feedback_room_message_dict(
             row,
@@ -1195,6 +1208,11 @@ class CommunityStore:
                 """,
                 (topic_id, submission.kind, timestamp),
             )
+            enqueue(connection, kind="feedback", entity_id=f"topic:{topic_id}", is_admin=is_admin,
+                    payload={"source": "主页", "page": "feedback", "title": submission.title,
+                             "nickname": submission.author.nickname, "content": submission.author.content,
+                             "status": status, "reason": moderation_reason[:300],
+                             "url": "https://tonks.top/", "quote": "", "created_at": timestamp})
         self._purge_after_submission(current, status)
         return {
             "id": topic_id,
@@ -1261,6 +1279,11 @@ class CommunityStore:
                 "UPDATE community_feedback_topics SET updated_at = ? WHERE id = ?",
                 (timestamp, int(topic_id)),
             )
+            enqueue(connection, kind="feedback", entity_id=f"message:{cursor.lastrowid}", is_admin=is_admin,
+                    payload={"source": "主页", "page": "feedback", "title": f"反馈主题 #{topic_id} 的回复",
+                             "nickname": submission.nickname, "content": submission.content,
+                             "status": status, "reason": moderation_reason[:300],
+                             "url": "https://tonks.top/", "quote": "", "created_at": timestamp})
         self._purge_after_submission(current, status)
         return {
             "id": int(cursor.lastrowid),
@@ -1748,6 +1771,11 @@ class CommunityStore:
                 ),
             )
             application_id = int(cursor.lastrowid)
+            enqueue(connection, kind="friend_application", entity_id=application_id,
+                    payload={"source": "博客/主页", "page": "friends", "title": submission.name,
+                             "nickname": submission.name, "content": submission.description,
+                             "status": "pending", "reason": "", "url": "https://tonks.top/",
+                             "quote": "", "created_at": timestamp})
         return {
             "id": application_id,
             "name": submission.name,

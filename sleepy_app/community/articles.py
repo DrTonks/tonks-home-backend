@@ -5,6 +5,8 @@ Set SLEEPY_ARTICLE_MANIFEST to dist/community/comment-manifest.json.
 """
 from __future__ import annotations
 from sleepy_app.config import PROJECT_ROOT
+from sleepy_app.notifications.outbox import enqueue
+from urllib.parse import quote as quote_url
 
 import json
 import os
@@ -144,6 +146,11 @@ class ArticleCommentStore:
 
     def create(self, submission, context, parent, actor, owner, status, reason, admin=False):
         self.initialize()
+        # Notification metadata is already validated by context(); no extra I/O in the transaction.
+        article = self._articles.get(context['article_id'], {})
+        slug = str(article.get('slug', '')).strip('/')
+        article_url = 'https://blog.tonks.top/posts/' + quote_url(slug, safe='/') + '/' if slug else 'https://blog.tonks.top/'
+        timestamp = datetime.now(timezone.utc).isoformat()
         with self.community._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             # Recheck after moderation, which can take time.
@@ -157,10 +164,16 @@ class ArticleCommentStore:
                 (context['article_id'], context['block_id'], context['version'], '' if parent else context['quote'],
                  parent['id'] if parent else None, parent['root_id'] if parent else None,
                  submission.nickname, submission.email, submission.website, submission.content,
-                 actor, owner, status, reason, int(admin), datetime.now(timezone.utc).isoformat()))
+                 actor, owner, status, reason, int(admin), timestamp))
             ident = cursor.lastrowid
             if not parent:
                 db.execute('UPDATE article_comments SET root_id=? WHERE id=?', (ident, ident))
+            enqueue(db, kind="article_comment", entity_id=ident, is_admin=admin,
+                    payload={"source": "博客", "page": context['article_id'],
+                             "title": article.get('title') or slug or context['article_id'],
+                             "nickname": submission.nickname, "content": submission.content,
+                             "status": status, "reason": reason, "url": article_url,
+                             "quote": context.get('quote', ''), "created_at": timestamp})
         return ident
 
     def public(self, row, owner='', admin=False):
