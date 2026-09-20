@@ -1,6 +1,9 @@
 # coding: utf-8
 from __future__ import annotations
 
+import os
+from unittest.mock import patch
+import manage_article_views
 import sqlite3
 import unittest
 from contextlib import closing
@@ -45,6 +48,23 @@ class ManageArticleViewsTests(unittest.TestCase):
             if path.exists():
                 path.unlink()
         self.temporary_directory.rmdir()
+
+    def test_shared_database_paths(self):
+        with patch.dict(os.environ, {"SLEEPY_DATA_DIR": str(self.temporary_directory)}, clear=True):
+            self.assertEqual(manage_article_views.database_path(), self.database)
+            os.environ["SLEEPY_ANALYTICS_DB"] = "custom.sqlite3"
+            self.assertEqual(manage_article_views.database_path(), self.temporary_directory / "custom.sqlite3")
+            os.environ["SLEEPY_ANALYTICS_DB"] = str(self.database)
+            self.assertEqual(manage_article_views.database_path(), self.database)
+
+    def test_cli_loads_explicit_env_before_resolving_database(self):
+        env_file = self.temporary_directory / "settings.env"
+        env_file.write_text("SLEEPY_DATA_DIR=" + self.temporary_directory.as_posix(), encoding="utf-8")
+        try:
+            with patch.dict(os.environ, {"SLEEPY_ENV_FILE": str(env_file)}, clear=True):
+                self.assertEqual(manage_article_views.main(["--list"]), 0)
+        finally:
+            env_file.unlink()
 
     def test_lists_and_resolves_number_or_slug(self) -> None:
         with closing(connect_existing(self.database)) as connection:

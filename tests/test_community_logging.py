@@ -61,7 +61,7 @@ def startup_probe(entry, scenario):
         return importlib.import_module("server").community_store
 
     store = start()
-    from community import validate_comment_payload, validate_feedback_topic_payload
+    from sleepy_app.community.store import validate_comment_payload, validate_feedback_topic_payload
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     payload = {
         "nickname": "Private name", "email": "private@example.com",
@@ -96,8 +96,8 @@ def startup_probe(entry, scenario):
                                for table in COUNTS if table != "community_comments")
     first_handlers = list(logging.getLogger("community").handlers)
     for _ in range(3):
-        if "runtime_logging" in sys.modules:
-            importlib.reload(sys.modules["runtime_logging"])
+        if "sleepy_app.common.logging" in sys.modules:
+            importlib.reload(sys.modules["sleepy_app.common.logging"])
         store = start()
     logger = logging.getLogger("community")
     submit(now)  # Persisted daily gate stays silent after server/config reloads.
@@ -147,6 +147,7 @@ class CommunityStartupLoggingTests(unittest.TestCase):
                 env = {key: value for key, value in os.environ.items() if not key.startswith("SLEEPY_")}
                 env.update({
                     "SLEEPY_ENV_FILE": str(root / "missing.env"),
+                    "SLEEPY_DATA_DIR": str(root),
                     "SLEEPY_MUSIC_DIR": str(root / "music"),
                     "SLEEPY_GITHUB_CACHE_FILE": str(root / "github.json"),
                     "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",

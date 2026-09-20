@@ -1,6 +1,7 @@
 """Independent LLM moderation for public blog comments."""
 
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 from dataclasses import dataclass
 import json
@@ -13,7 +14,7 @@ from pet_ai.config import PetAIConfig
 from pet_ai.provider import OpenAICompatibleProvider, ProviderError
 
 
-PROMPT_PATH = Path(__file__).resolve().with_name("comment_moderation_prompt.md")
+PROMPT_PATH = (PROJECT_ROOT / "comment_moderation_prompt.md")
 
 
 @dataclass(frozen=True)

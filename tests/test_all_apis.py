@@ -63,6 +63,8 @@ def setUpModule():
         json.dumps(TEST_CONFIG, ensure_ascii=False),
         encoding="utf-8",
     )
+    os.environ["SLEEPY_DATA_FILE"] = str(root / "data.json")
+    os.environ["SLEEPY_IMAGES_DIR"] = str(root / "images")
     os.environ["SLEEPY_MUSIC_DIR"] = str(root / "music")
     os.environ["SLEEPY_ANALYTICS_DB"] = str(root / "analytics.sqlite3")
     os.environ["SLEEPY_AGENT_ACTIVITY_DB"] = str(root / "agent_activity.sqlite3")
@@ -77,15 +79,17 @@ def setUpModule():
     os.environ["SLEEPY_SENIVERSE_API_KEY"] = "weather-test-key"
     os.chdir(root)
     sys.path.insert(0, str(REPO_DIR))
-    import server as imported_backend
+    from tests.runtime_adapter import RuntimeAdapter, create_app
 
-    backend = imported_backend
+    backend = RuntimeAdapter(create_app())
     backend.app.config.update(TESTING=True)
 
 
 def tearDownModule():
     os.chdir(original_cwd)
     for name in (
+        "SLEEPY_DATA_FILE",
+        "SLEEPY_IMAGES_DIR",
         "SLEEPY_MUSIC_DIR",
         "SLEEPY_ANALYTICS_DB",
         "SLEEPY_AGENT_ACTIVITY_DB",
@@ -110,6 +114,16 @@ def tearDownModule():
 
 class AllApiRoutesTest(unittest.TestCase):
     maxDiff = None
+
+    def test_legacy_http_route_contract(self):
+        expected = json.loads((REPO_DIR / 'tests/fixtures/legacy_routes.json').read_text(encoding='utf-8'))
+        actual = {rule.endpoint: rule for rule in backend.app.url_map.iter_rules()}
+        for entry in expected:
+            with self.subTest(endpoint=entry['endpoint']):
+                self.assertIn(entry['endpoint'], actual)
+                rule = actual[entry['endpoint']]
+                self.assertEqual(rule.rule, entry['rule'])
+                self.assertEqual(rule.methods - {'HEAD', 'OPTIONS'}, set(entry['methods']))
 
     def setUp(self):
         root = workspace
@@ -1371,7 +1385,7 @@ class AllApiRoutesTest(unittest.TestCase):
         self.assertEqual(result["username"], "contract-user")
 
     def test_github_language_stats_use_repository_count(self):
-        source = Path(backend.__file__).read_text(encoding="utf-8")
+        source = (REPO_DIR / "sleepy_app/integrations/external.py").read_text(encoding="utf-8")
         self.assertIn("affiliations: [OWNER]", source)
         self.assertIn("first: 100", source)
         self.assertNotIn("orderBy: {field: STARGAZERS", source)

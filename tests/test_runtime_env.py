@@ -4,7 +4,7 @@ import shutil
 import unittest
 from unittest.mock import patch
 
-from runtime_env import configured_value, load_env_file, migrate_sensitive_data_keys
+from sleepy_app.common.environment import configured_value, load_env_file, migrate_sensitive_data_keys
 
 
 class FakeDataStore:

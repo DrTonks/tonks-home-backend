@@ -1,5 +1,5 @@
 import unittest
-from blog_images import blog_image_url, normalize_blog_images
+from sleepy_app.blog.images import blog_image_url, normalize_blog_images
 
 
 class BlogImagesTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 """SQLite-backed analytics storage for public blog metrics and agent activity."""
 
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 import os
 import sqlite3
@@ -18,7 +19,7 @@ def default_database_path() -> str:
     configured = os.environ.get("SLEEPY_ANALYTICS_DB")
     if configured:
         return configured
-    return str(Path(__file__).resolve().with_name("analytics.sqlite3"))
+    return str((PROJECT_ROOT / "analytics.sqlite3"))
 
 
 class BlogAnalytics:
@@ -178,7 +179,7 @@ def _default_agent_activity_db_path() -> str:
     configured = os.environ.get("SLEEPY_AGENT_ACTIVITY_DB")
     if configured:
         return configured
-    return str(Path(__file__).resolve().with_name("agent_activity.sqlite3"))
+    return str((PROJECT_ROOT / "agent_activity.sqlite3"))
 
 
 class AgentActivityStore:

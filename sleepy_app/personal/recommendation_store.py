@@ -1,6 +1,7 @@
 """SQLite storage and validation for public pet recommendations."""
 
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 from collections import defaultdict, deque
 from contextlib import contextmanager
@@ -33,7 +34,7 @@ def default_recommendations_database_path() -> str:
     configured = os.environ.get("SLEEPY_RECOMMENDATIONS_DB")
     if configured:
         return configured
-    return str(Path(__file__).resolve().with_name("recommendations.sqlite3"))
+    return str((PROJECT_ROOT / "recommendations.sqlite3"))
 
 
 def recommendation_limit_from_env(name: str, default: int, maximum: int) -> int:

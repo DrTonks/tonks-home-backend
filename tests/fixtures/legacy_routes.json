@@ -1,0 +1,334 @@
+[
+  {
+    "endpoint": "pet_recommendations",
+    "rule": "/pet/recommendations",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "delete_pet_recommendation",
+    "rule": "/pet/recommendations/<int:recommendation_id>",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "endpoint": "index",
+    "rule": "/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "visitor_weather",
+    "rule": "/weather",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "geoip",
+    "rule": "/geoip",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "query",
+    "rule": "/query",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "status_history",
+    "rule": "/status-history",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "get_status_list",
+    "rule": "/get/status_list",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "online_count",
+    "rule": "/online_count",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "set_normal",
+    "rule": "/set",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "agent_activity",
+    "rule": "/agent-activity",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_posts",
+    "rule": "/blog-posts",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "blog_views",
+    "rule": "/blog/views",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "record_blog_view",
+    "rule": "/blog/views/<path:slug>",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_site_visits",
+    "rule": "/blog/site-visits",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_community_avatar_preview",
+    "rule": "/blog/community/avatar-preview",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_community_avatar",
+    "rule": "/blog/community/avatar/<int:comment_id>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "blog_feedback_avatar",
+    "rule": "/blog/community/feedback/avatar/<int:message_id>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "blog_feedback_room_avatar",
+    "rule": "/blog/community/feedback/room-avatar/<int:message_id>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "blog_community_likes",
+    "rule": "/blog/community/likes",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "toggle_blog_community_like",
+    "rule": "/blog/community/likes/<path:target>",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_community_comments",
+    "rule": "/blog/community/comments/<page>",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "pin_blog_community_comment",
+    "rule": "/blog/community/comments/<int:comment_id>/pin",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "endpoint": "manage_blog_community_comment",
+    "rule": "/blog/community/comments/<int:comment_id>",
+    "methods": [
+      "PATCH",
+      "DELETE"
+    ]
+  },
+  {
+    "endpoint": "blog_community_feedback",
+    "rule": "/blog/community/feedback",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "add_blog_feedback_room_message",
+    "rule": "/blog/community/feedback/messages",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "add_blog_feedback_message",
+    "rule": "/blog/community/feedback/<int:topic_id>/messages",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "manage_blog_feedback_topic",
+    "rule": "/blog/community/feedback/<int:topic_id>",
+    "methods": [
+      "PATCH",
+      "DELETE"
+    ]
+  },
+  {
+    "endpoint": "convert_comment_tree_to_feedback",
+    "rule": "/blog/community/feedback/from-comment",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "merge_blog_feedback_topics",
+    "rule": "/blog/community/feedback/merge",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "blog_friend_applications",
+    "rule": "/blog/community/friend-applications",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "get_own_blog_friend_applications",
+    "rule": "/blog/community/friend-applications/status",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "update_blog_friend_application",
+    "rule": "/blog/community/friend-applications/<int:application_id>",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "serve_image",
+    "rule": "/images/<path:filename>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "music_list",
+    "rule": "/music/list",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "music_stream",
+    "rule": "/music/<path:filename>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "music_lyrics",
+    "rule": "/music/lyrics/<path:filename>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "music_cover",
+    "rule": "/music/cover/<path:filename>",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "music_cover_upload",
+    "rule": "/music/cover/upload",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "music_upload",
+    "rule": "/music/upload",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "music_delete",
+    "rule": "/music/delete",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "music_reorder",
+    "rule": "/music/reorder",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "calendar_events",
+    "rule": "/calendar/events",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  },
+  {
+    "endpoint": "calendar_holidays",
+    "rule": "/calendar/holidays",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "github_stats",
+    "rule": "/github/stats",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "endpoint": "todos",
+    "rule": "/todos",
+    "methods": [
+      "GET",
+      "POST"
+    ]
+  }
+]

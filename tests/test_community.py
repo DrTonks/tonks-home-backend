@@ -11,8 +11,8 @@ import unittest
 import uuid
 from unittest import mock
 
-from comment_moderation import CommentModerationService, ModerationResult
-from community import (
+from sleepy_app.community.moderation import CommentModerationService, ModerationResult
+from sleepy_app.community.store import (
     _retention_expired,
     CommunityBurstLimiter,
     CommunityRateLimitExceeded,
@@ -128,7 +128,7 @@ class CommunityStoreTests(unittest.TestCase):
             connection.execute("UPDATE community_comments SET status = 'deleted' WHERE id = ?", (old["id"],))
             connection.execute("ALTER TABLE community_comments DROP COLUMN deleted_at")
         migration = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
-        with mock.patch("community.datetime", wraps=datetime) as clock:
+        with mock.patch("sleepy_app.community.store.datetime", wraps=datetime) as clock:
             clock.now.return_value = migration
             self.store.initialize()
             clock.now.return_value = migration + timedelta(days=10)
@@ -143,7 +143,7 @@ class CommunityStoreTests(unittest.TestCase):
         root = self.purge_comment()
         child = self.purge_comment(parent_context=self.store.get_parent_context("about", root["id"]))
         first = datetime(2026, 1, 31, tzinfo=timezone.utc)
-        with mock.patch("community.datetime", wraps=datetime) as clock:
+        with mock.patch("sleepy_app.community.store.datetime", wraps=datetime) as clock:
             clock.now.return_value = first
             self.store.delete_comment(child["id"])
             clock.now.return_value = first + timedelta(days=2)
@@ -480,7 +480,7 @@ class CommunityStoreTests(unittest.TestCase):
             self.store.update_comment_status(comment["id"], "pending")
 
     def test_friend_application_lifecycle(self):
-        from community import FriendApplicationSubmission
+        from sleepy_app.community.store import FriendApplicationSubmission
 
         application = self.store.create_friend_application(
             FriendApplicationSubmission(
@@ -669,12 +669,18 @@ class ModerationTests(unittest.TestCase):
 
 class CommunityRouteTests(unittest.TestCase):
     def setUp(self):
-        import server
+        from tests.runtime_adapter import RuntimeAdapter, create_app
+        from sleepy_app.config import Paths
+        import os
+        from unittest.mock import patch
 
-        self.server = server
         self.temporary_directory = Path(
             tempfile.mkdtemp(prefix=f"sleepy-community-route-{uuid.uuid4().hex}-")
         )
+        (self.temporary_directory / 'data.json').write_text('{}')
+        with patch.dict(os.environ, {'SLEEPY_DATA_DIR': str(self.temporary_directory), 'SLEEPY_ENV_FILE': str(self.temporary_directory / 'missing.env')}):
+            server = RuntimeAdapter(create_app())
+        self.server = server
         self.store = CommunityStore(str(self.temporary_directory / "community.sqlite3"))
         self.patches = [
             mock.patch.object(server, "community_store", self.store),

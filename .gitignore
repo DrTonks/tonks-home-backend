@@ -51,3 +51,7 @@ Thumbs.db
 music/*
 !music/.gitkeep
 github_stats_cache.json
+
+# Local refactor diagnostics and code release archives
+.test-*.json
+.releases/

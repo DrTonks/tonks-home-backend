@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from flask import Flask
-from community import CommunityStore, CommunityValidationError, validate_comment_payload, CommunityBurstLimiter
-from comment_moderation import ModerationResult
-from article_comments import ArticleCommentStore, register_article_comments
+from sleepy_app.community.store import CommunityStore, CommunityValidationError, validate_comment_payload, CommunityBurstLimiter
+from sleepy_app.community.moderation import ModerationResult
+from sleepy_app.community.articles import ArticleCommentStore, register_article_comments
 
 
 class ArticleCommentsTests(unittest.TestCase):
@@ -141,7 +141,7 @@ class ArticleCommentsTests(unittest.TestCase):
         with self.assertRaises(CommunityValidationError):self.store.manage('a_one',leaf,'published')
 
     def test_history_truncation_keeps_recent_comments(self):
-        from comment_moderation import CommentModerationService
+        from sleepy_app.community.moderation import CommentModerationService
         from unittest.mock import patch
         for i in range(23):self.create(content=f'留言{i:02d} '+('内容'*350))
         history=self.store.history('actor')

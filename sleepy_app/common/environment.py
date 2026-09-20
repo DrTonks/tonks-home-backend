@@ -1,6 +1,7 @@
 """Load private runtime settings from a local .env without extra dependencies."""
 
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 import json
 import os
@@ -33,8 +34,8 @@ def _parse_value(raw: str) -> str:
 
 
 def load_env_file(path: str | os.PathLike[str] | None = None) -> Path | None:
-    """Load .env next to this module; existing process variables take precedence."""
-    env_path = Path(path) if path else Path(__file__).resolve().with_name(".env")
+    """Load .env at the project root; existing process variables take precedence."""
+    env_path = Path(path) if path else (PROJECT_ROOT / ".env")
     if not env_path.is_file():
         return None
     for line in env_path.read_text(encoding="utf-8-sig").splitlines():

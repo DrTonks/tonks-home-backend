@@ -1,3 +1,5 @@
+> 开发导航：[项目地图](docs/PROJECT_MAP.md) · [部署与回退](docs/DEPLOYMENT.md) · [本地验收](docs/REFACTOR_VALIDATION.md)
+
 # Personal Status Server
 
 ## 文章浏览量与站点访问量
@@ -17,9 +19,9 @@
 博客互动数据使用独立的 `community.sqlite3`，不会写入静态博客文件：
 
 - 点赞目标仅允许关于本站、友链和合法文章 slug；同一匿名客户端对同一目标最多贡献一个当前点赞，再次点击可取消。
-- 评论只允许 `about` 和 `friends`，支持回复。昵称、邮箱和内容必填，网站可选；邮箱当前只做格式校验，不代表已验证身份。管理员可使用已有 `SLEEPY_ADMIN_SECRET` 发布带“站长”标识的评论并软删除评论及回复。
+- 普通页面评论支持 `about` 和 `friends`；文章及段评由发布清单决定是否开放，支持回复。昵称、邮箱和内容必填，网站可选；邮箱当前只做格式校验，不代表已验证身份。管理员可使用已有 `SLEEPY_ADMIN_SECRET` 发布带“站长”标识的评论并软删除评论及回复。
 - 公开 API 永不返回邮箱或内部身份哈希。原始邮箱仅保存在服务端 SQLite 中，供头像代理、后续管理端联系和审核历史使用；备份和迁移该数据库时应按含个人信息的数据处理。
-- `/blog/community/avatar/<comment_id>` 会优先代理到 Gravatar 兼容头像；没有远程头像时，客户端自动请求 `?fallback=1`，由服务端返回不含个人信息的稳定 SVG 头像。
+- `/blog/community/avatar/<comment_id>` 对 QQ 邮箱使用 QQ 头像，其余邮箱返回不含个人信息的稳定 SVG 头像，避免等待远程头像服务。
 - 友链申请写入 `friend_link_applications`，状态初始为 `pending`，不会自动修改博客静态 `public/data/friends.json`；提交时返回一次性追踪 token，数据库只保存摘要，访客可凭 token 查询自己的审核结果，管理员管理接口可供外部管理站接入。
 - 评论审核使用独立的 `comment_moderation_prompt.md`，不会载入桌宠 persona。模型输入包含同一标准化邮箱哈希对应的历史发言，但不包含邮箱地址。
 - 明确广告或灌水会被拒绝；不确定或模型不可用的评论保存为 `pending` 且不公开，待后续管理端处理。

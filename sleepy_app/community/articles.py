@@ -4,6 +4,7 @@ The manifest is a trusted build artifact, never supplied by a comment author.
 Set SLEEPY_ARTICLE_MANIFEST to dist/community/comment-manifest.json.
 """
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 import json
 import os
@@ -12,7 +13,7 @@ from datetime import datetime, timezone
 import threading
 
 from flask import request, jsonify, Response, redirect
-from community import (CommunityValidationError, CommunityRateLimitExceeded,
+from sleepy_app.community.store import (CommunityValidationError, CommunityRateLimitExceeded,
                        validate_comment_payload, community_limit_from_env)
 
 
@@ -78,7 +79,7 @@ class ArticleCommentStore:
 
     def _load_articles(self):
         path = Path(self.manifest_path or os.environ.get('SLEEPY_ARTICLE_MANIFEST',
-                    str(Path(__file__).with_name('article-comments-manifest.json'))))
+                    str((PROJECT_ROOT / 'article-comments-manifest.json'))))
         try:
             stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
             with self._lock:

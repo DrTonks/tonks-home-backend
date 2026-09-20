@@ -6,7 +6,7 @@ import shutil
 import unittest
 import uuid
 
-from recommendations import (
+from sleepy_app.personal.recommendation_store import (
     RecommendationRateLimiter,
     RecommendationRateLimitExceeded,
     RecommendationStore,

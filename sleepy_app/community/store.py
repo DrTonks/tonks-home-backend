@@ -1,6 +1,7 @@
 """SQLite-backed likes and moderated comments for the public blog."""
 
 from __future__ import annotations
+from sleepy_app.config import PROJECT_ROOT
 
 from calendar import monthrange
 from collections import defaultdict, deque
@@ -92,7 +93,7 @@ def default_community_database_path() -> str:
     configured = os.environ.get("SLEEPY_COMMUNITY_DB")
     if configured:
         return configured
-    return str(Path(__file__).resolve().with_name("community.sqlite3"))
+    return str((PROJECT_ROOT / "community.sqlite3"))
 
 
 def community_limit_from_env(name: str, default: int, maximum: int) -> int:
@@ -763,7 +764,7 @@ class CommunityStore:
         try:
             self._lazy_purge(now.astimezone(timezone.utc))
         except Exception:
-            logging.getLogger(__name__).exception("Community lazy purge failed after submission commit")
+            logging.getLogger("community").exception("Community lazy purge failed after submission commit")
 
     def _lazy_purge(self, now: datetime) -> None:
         # The accepted comment has already committed. Serialize the persisted daily
@@ -786,13 +787,13 @@ class CommunityStore:
                 counts = self._purge_deleted_records(connection, now)
             except Exception:
                 connection.execute("ROLLBACK TO lazy_purge")
-                logging.getLogger(__name__).exception("Community lazy purge rolled back")
+                logging.getLogger("community").exception("Community lazy purge rolled back")
             finally:
                 connection.execute("RELEASE lazy_purge")
 
         # Log only after commit, never report rolled-back deletions as successful.
         if counts is not None:
-            logging.getLogger(__name__).info("Community lazy purge committed: counts=%s", counts)
+            logging.getLogger("community").info("Community lazy purge committed: counts=%s", counts)
 
     def _purge_deleted_records(self, connection: sqlite3.Connection, now: datetime) -> dict[str, int]:
         counts = {}

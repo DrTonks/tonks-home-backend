@@ -2,7 +2,7 @@
 """交互式查看并设置博客文章浏览量。
 
 默认操作脚本同目录下的 analytics.sqlite3。测试或维护其他副本时，可通过
-SLEEPY_ANALYTICS_DB 环境变量指定数据库路径。
+SLEEPY_ANALYTICS_DB 环境变量指定数据库路径；与服务端共享 SLEEPY_DATA_DIR。
 """
 
 from __future__ import annotations
@@ -16,12 +16,14 @@ from contextlib import closing
 from pathlib import Path
 
 
+from sleepy_app.config import Paths
+from sleepy_app.common.environment import load_env_file
+
 LOCK_TIMEOUT_SECONDS = 10
 
 
 def database_path() -> Path:
-    configured = os.environ.get("SLEEPY_ANALYTICS_DB")
-    return Path(configured) if configured else Path(__file__).with_name("analytics.sqlite3")
+    return Paths.from_env().analytics_db
 
 
 def connect_existing(path: Path) -> sqlite3.Connection:
@@ -143,6 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    load_env_file(os.environ.get("SLEEPY_ENV_FILE") or None)
     path = database_path().resolve()
     print(f"数据库：{path}")
     try:
