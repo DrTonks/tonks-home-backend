@@ -1,6 +1,6 @@
 # Sleepy 项目地图
 
-本轮已完成模块拆分；线上仍使用原版本。验证记录见 [验收记录](REFACTOR_VALIDATION.md)，未来发布见 [部署与回退](DEPLOYMENT.md)，接口定位见 [HTTP 路由地图](HTTP_ROUTES.md)。
+本轮已完成模块拆分，2026-09-20 经用户授权完成云端部署。验证记录见 [验收记录](REFACTOR_VALIDATION.md)，未来发布见 [部署与回退](DEPLOYMENT.md)，接口定位见 [HTTP 路由地图](HTTP_ROUTES.md)。
 
 ## 请求如何流动
 
