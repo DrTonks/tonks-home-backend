@@ -76,4 +76,6 @@ def create_app(paths=None):
         'community_qq_avatar_url': community_qq_avatar_url,
     })
     app.extensions["article_comments"].manifest_path = paths.article_manifest
+    from sleepy_app.community.polls import register_polls
+    register_polls(app, runtime, paths)
     return app

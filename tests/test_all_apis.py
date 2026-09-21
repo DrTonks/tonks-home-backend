@@ -177,6 +177,8 @@ class AllApiRoutesTest(unittest.TestCase):
 
     def test_route_inventory_matches_tested_contract(self):
         expected = {
+            ("GET", "/blog/community/polls/<ident>"),
+            ("POST", "/blog/community/polls/<ident>"),
             ("GET", "/blog/community/articles/<article_id>/comments"),
             ("POST", "/blog/community/articles/<article_id>/comments"),
             ("PATCH", "/blog/community/articles/<article_id>/comments/<int:ident>"),
