@@ -42,9 +42,6 @@ class Runtime:
         self.MAX_COVER_BYTES = 5 * 1024 * 1024
         if not os.path.exists(self.MUSIC_DIR):
             os.makedirs(self.MUSIC_DIR, exist_ok=True)
-        self.IMAGES_DIR = str(paths.images)
-        if not os.path.exists(self.IMAGES_DIR):
-            os.makedirs(self.IMAGES_DIR, exist_ok=True)
         self.online_users = {}
         self.online_lock = threading.Lock()
         self.ONLINE_TIMEOUT = 120

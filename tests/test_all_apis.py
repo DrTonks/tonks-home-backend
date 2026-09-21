@@ -64,7 +64,6 @@ def setUpModule():
         encoding="utf-8",
     )
     os.environ["SLEEPY_DATA_FILE"] = str(root / "data.json")
-    os.environ["SLEEPY_IMAGES_DIR"] = str(root / "images")
     os.environ["SLEEPY_MUSIC_DIR"] = str(root / "music")
     os.environ["SLEEPY_ANALYTICS_DB"] = str(root / "analytics.sqlite3")
     os.environ["SLEEPY_AGENT_ACTIVITY_DB"] = str(root / "agent_activity.sqlite3")
@@ -89,7 +88,6 @@ def tearDownModule():
     os.chdir(original_cwd)
     for name in (
         "SLEEPY_DATA_FILE",
-        "SLEEPY_IMAGES_DIR",
         "SLEEPY_MUSIC_DIR",
         "SLEEPY_ANALYTICS_DB",
         "SLEEPY_AGENT_ACTIVITY_DB",
@@ -1206,6 +1204,15 @@ class AllApiRoutesTest(unittest.TestCase):
         )
         self.assertEqual(approved["applications"][0]["status"], "approved")
         self.assertEqual(approved["applications"][0]["moderation_note"], "欢迎加入")
+
+    def test_retired_local_images_are_not_served_or_initialized(self):
+        from sleepy_app.config import Paths
+        self.assertNotIn('images', Paths.__dataclass_fields__)
+        self.assertFalse(hasattr(backend.runtime, 'IMAGES_DIR'))
+        self.assertFalse((workspace / 'images').exists())
+        for path in ('/images/old.png', '/images/other/old.png', '/images/../data.json'):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 404)
 
     def test_image_route(self):
         response = self.client.get("/images/projects/calculator.png")

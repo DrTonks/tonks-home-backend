@@ -33,7 +33,6 @@
   "_blog_image_path": "blog_service",
   "_blog_image_base": "blog_service",
   "_extract_links": "blog_service",
-  "_extract_images": "blog_service",
   "fetch_blog_extra": "blog_service",
   "_read_github_stats_cache": "integrations_external",
   "_write_github_stats_cache": "integrations_external",

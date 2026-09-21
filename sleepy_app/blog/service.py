@@ -148,25 +148,6 @@ class BlogService:
         return links
 
 
-    def _extract_images(self, entry):
-        """提取图片路径，转为本地可访问的 URL"""
-        raw = entry.get('image', None)
-        if raw is None:
-            return []
-        if isinstance(raw, str):
-            paths = [raw]
-        elif isinstance(raw, list):
-            paths = raw
-        else:
-            return []
-        result = []
-        for p in paths:
-            url = self._blog_image_path(p)
-            if url:
-                result.append(url)
-        return result
-
-
     def fetch_blog_extra(self):
         """获取博客的额外数据：按时间倒序取最新的项目和时光机条目"""
         blog_data_url = os.environ.get(

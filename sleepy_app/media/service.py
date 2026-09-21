@@ -20,15 +20,8 @@ class MediaService:
             response = redirect(target, code=302)
             response.headers['Cache-Control'] = 'public, max-age=300'
             return response
-        # 安全检查：防止目录遍历
-        safe_path = os.path.normpath(filename)
-        if safe_path.startswith('..') or os.path.isabs(safe_path):
-            return self.runtime.common_security.reterr(code='not found', message='image not found')
-        file_path = os.path.join(self.runtime.IMAGES_DIR, safe_path)
-        if not os.path.isfile(file_path):
-            return self.runtime.common_security.reterr(code='not found', message=f'image not found: {filename}')
-        # send_from_directory 需要正斜杠（Windows 兼容）
-        return send_from_directory(self.runtime.IMAGES_DIR, safe_path.replace(os.sep, '/'), conditional=True)
+        # Local image copies have been retired; only legacy project redirects remain.
+        return self.runtime.common_security.reterr(code='not found', message='image not found'), 404
 
 
     def music_list(self):
