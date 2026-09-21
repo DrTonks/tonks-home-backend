@@ -49,6 +49,7 @@ class Runtime:
         self.online_lock = threading.Lock()
         self.ONLINE_TIMEOUT = 120
         self.write_lock = threading.Lock()
+        self.CALENDAR_CACHE_DIR = os.path.join(os.path.dirname(str(paths.data_file)), 'holiday-cache')
         self.GITHUB_CACHE_TTL_SECONDS = 24 * 60 * 60
         self.GITHUB_CACHE_VERSION = 2
         self.GITHUB_CACHE_FILE = str(paths.github_cache)

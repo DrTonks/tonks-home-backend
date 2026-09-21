@@ -55,3 +55,6 @@ github_stats_cache.json
 # Local refactor diagnostics and code release archives
 .test-*.json
 .releases/
+
+# Downloaded holiday cache (keep during code deployments)
+holiday-cache/

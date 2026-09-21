@@ -1,5 +1,7 @@
 """integrations/external business operations and HTTP handlers. State is application-scoped."""
 import os
+from pathlib import Path
+from sleepy_app.integrations.calendar import HolidayCalendar
 from sleepy_app.status.heatmap import _percentile_thresholds, _intensity_level
 from sleepy_app.common.environment import configured_value
 import sleepy_app.common.responses as u
@@ -15,6 +17,7 @@ import urllib.parse
 class ExternalService:
     def __init__(self, runtime):
         self.runtime = runtime
+        self.calendar = HolidayCalendar(Path(runtime.CALENDAR_CACHE_DIR))
 
     def _read_github_stats_cache(self):
         try:
@@ -239,51 +242,24 @@ class ExternalService:
 
 
     def fetch_public_holidays(self, year=None, country_code='CN'):
-        """获取公共节假日。Nager.Date 在国内不可用，直接用硬编码数据。"""
-        if year is None:
-            year = time.localtime().tm_year
-        return self.hardcoded_holidays(year, country_code)
-
-
-    def hardcoded_holidays(self, year: int, country_code: str):
-        """Nager.Date 不可用时的中国节假日兜底数据"""
         if country_code != 'CN':
             return []
-        return [
-            {'date': f'{year}-01-01', 'name': '元旦', 'countryCode': 'CN'},
-            {'date': f'{year}-02-17', 'name': '春节', 'countryCode': 'CN'},
-            {'date': f'{year}-04-05', 'name': '清明节', 'countryCode': 'CN'},
-            {'date': f'{year}-05-01', 'name': '劳动节', 'countryCode': 'CN'},
-            {'date': f'{year}-06-19', 'name': '端午节', 'countryCode': 'CN'},
-            {'date': f'{year}-09-25', 'name': '中秋节', 'countryCode': 'CN'},
-            {'date': f'{year}-10-01', 'name': '国庆节', 'countryCode': 'CN'},
-        ]
-
+        return self.calendar.get(year or time.localtime().tm_year)['publicHolidays']
 
     def calendar_holidays(self):
-        """获取公共节假日"""
-        year_str = request.args.get('year', '')
         country = request.args.get('country', 'CN')
-
         try:
-            year = int(year_str) if year_str else time.localtime().tm_year
+            year = int(request.args.get('year') or time.localtime().tm_year)
+            if country != 'CN':
+                return u.format_dict({'success': False, 'message': '仅支持中国节假日'}), 400
+            result = self.calendar.get(year)
         except ValueError:
-            year = time.localtime().tm_year
-
-        holidays = self.fetch_public_holidays(year=year, country_code=country)
-
-        # 同时返回本地日历事件中 type=holiday 的条目
+            return u.format_dict({'success': False, 'message': '节假日年份超出支持范围'}), 400
         self.runtime.d.load()
         local_holidays = [e for e in self.runtime.d.data.get('calendar_events', [])
-                          if e.get('type') == 'holiday' and str(year) in e.get('date', '')]
-
-        return u.format_dict({
-            'success': True,
-            'year': year,
-            'country': country,
-            'publicHolidays': holidays,
-            'customHolidays': local_holidays
-        })
+                          if e.get('type') == 'holiday' and e.get('date', '').startswith(f'{year}-')]
+        return u.format_dict(dict(success=True, year=year, country=country,
+                                  customHolidays=local_holidays, **result))
 
 
     def github_stats(self):
