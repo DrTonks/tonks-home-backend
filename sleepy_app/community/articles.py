@@ -42,6 +42,7 @@ class ArticleCommentStore:
         self._lock = threading.Lock()
         self._manifest_stamp = None
         self._articles = {}
+        self.poll_store = None
 
     def initialize(self):
         if self._ready:
@@ -101,6 +102,21 @@ class ArticleCommentStore:
             raise CommunityValidationError('not_found', '这篇文章尚未开放评论')
         return article
 
+    def discussion_filter(self, owner='', admin=False):
+        if admin:
+            return '1=1', []
+        allowed = sorted(self.poll_store.discussion_blocks(owner)) if self.poll_store else []
+        predicate = "(block_id IS NULL OR block_id NOT LIKE 'poll:%'"
+        if allowed:
+            predicate += ' OR block_id IN (' + ','.join('?' for _ in allowed) + ')'
+        return predicate + ')', allowed
+
+    def require_discussion(self, block, owner='', admin=False):
+        if block and block.startswith('poll:') and not admin:
+            allowed = self.poll_store.discussion_blocks(owner) if self.poll_store else set()
+            if block not in allowed:
+                raise CommunityValidationError('discussion_locked', '作答后才能查看和参与讨论')
+
     def get_public_totals_by_slug(self, slugs):
         """One indexed aggregate for all requested public articles; unknowns stay unavailable."""
         wanted = set(slugs)
@@ -110,16 +126,17 @@ class ArticleCommentStore:
         if not articles:
             return result
         self.initialize()
+        gate, gate_args = self.discussion_filter()
         placeholders = ','.join('?' for _ in articles)
         with self.community._connect() as db:
             rows = db.execute(
                 f"SELECT article_id,COUNT(*) n FROM article_comments WHERE status='published' "
-                f"AND article_id IN ({placeholders}) GROUP BY article_id", list(articles.values()))
+                f"AND article_id IN ({placeholders}) AND {gate} GROUP BY article_id", list(articles.values()) + gate_args)
             totals = {row['article_id']: row['n'] for row in rows}
         result.update({slug: totals.get(ident, 0) for slug, ident in articles.items()})
         return result
 
-    def context(self, article_id, payload):
+    def context(self, article_id, payload, owner='', admin=False):
         article = self.article(article_id)
         self.initialize()
         parent_id = comment_id(payload.get('parent_id'), optional=True)
@@ -132,6 +149,7 @@ class ArticleCommentStore:
                 root = db.execute('SELECT * FROM article_comments WHERE id=?', (parent['root_id'],)).fetchone()
             if root['status'] != 'published':
                 raise CommunityValidationError('invalid_parent', '这条讨论已不可用')
+            self.require_discussion(root['block_id'], owner, admin)
             return dict(root), dict(parent)
         if payload.get('version') != article['version']:
             raise CommunityValidationError('stale_version', '文章已更新，请刷新后再留言；已输入的内容会保留')
@@ -142,6 +160,7 @@ class ArticleCommentStore:
             if not match:
                 raise CommunityValidationError('invalid_block', '这个段落已更新，请刷新后再试')
             quote = match['text']
+        self.require_discussion(block, owner, admin)
         return {'article_id': article_id, 'block_id': block, 'version': article['version'], 'quote': quote}, None
 
     def create(self, submission, context, parent, actor, owner, status, reason, admin=False):
@@ -187,14 +206,19 @@ class ArticleCommentStore:
         return result
 
     def listing(self, article_id, block=None, before=0, root=0, after=0, owner='', admin=False):
-        self.article(article_id)
+        article = self.article(article_id)
         self.initialize()
+        gate, gate_args = self.discussion_filter(owner, admin)
+        allowed = set(gate_args)
+        locked = [b['id'] for b in article['blocks'] if b['id'].startswith('poll:') and b['id'] not in allowed] if not admin else []
+        if block is not None:
+            self.require_discussion(block, owner, admin)
         visible = "status IN ('published','pending','rejected')" if admin else "status='published'"
         with self.community._connect() as db:
             counts = {r['block_id'] or '': r['n'] for r in db.execute(
-                "SELECT block_id,COUNT(*) n FROM article_comments WHERE article_id=? AND status='published' GROUP BY block_id", (article_id,))}
+                f"SELECT block_id,COUNT(*) n FROM article_comments WHERE article_id=? AND status='published' AND {gate} GROUP BY block_id", [article_id] + gate_args)}
             if root:
-                parent = db.execute(f'SELECT * FROM article_comments WHERE id=? AND article_id=? AND parent_id IS NULL AND {visible}', (root, article_id)).fetchone()
+                parent = db.execute(f'SELECT * FROM article_comments WHERE id=? AND article_id=? AND parent_id IS NULL AND {visible} AND {gate}', [root, article_id] + gate_args).fetchone()
                 if not parent:
                     raise CommunityValidationError('invalid_parent', '讨论不可用')
                 rows = db.execute(f'SELECT * FROM article_comments WHERE root_id=? AND parent_id IS NOT NULL AND id>? AND {visible} ORDER BY id LIMIT 31', (root, after)).fetchall()
@@ -206,7 +230,7 @@ class ArticleCommentStore:
                     item['reply_to_name'] = target['nickname'] if target and target['status'] != 'deleted' else ''
                     comments.append(item)
                 return {'comments': comments, 'next_after': rows[29]['id'] if len(rows) > 30 else None}
-            conditions, args = ['article_id=?', 'parent_id IS NULL', visible], [article_id]
+            conditions, args = ['article_id=?', 'parent_id IS NULL', visible, gate], [article_id] + gate_args
             if block is not None:
                 conditions.append('block_id=?'); args.append(block)
             if before:
@@ -217,7 +241,7 @@ class ArticleCommentStore:
                 item = self.public(row, owner, admin)
                 item['reply_count'] = db.execute(f'SELECT COUNT(*) FROM article_comments WHERE root_id=? AND parent_id IS NOT NULL AND {visible}', (row['id'],)).fetchone()[0]
                 comments.append(item)
-            return {'comments': comments, 'counts': counts, 'count': sum(counts.values()),
+            return {'comments': comments, 'counts': counts, 'count': sum(counts.values()), 'locked_blocks': locked,
                     'next_before': rows[19]['id'] if len(rows) > 20 else None}
 
     def history(self, actor):
@@ -261,7 +285,8 @@ def register_article_comments(app, services):
 
     def respond(**data):
         response = jsonify(success=True, **data)
-        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['Vary'] = 'X-Community-Identity, X-Admin-Secret'
         return response
 
     @app.route('/blog/community/articles/<article_id>/comments', methods=['GET', 'POST'])
@@ -291,7 +316,7 @@ def register_article_comments(app, services):
                 raise CommunityValidationError('invalid_body', '留言格式无效')
             payload['parent_id'] = comment_id(payload.get('parent_id'), optional=True)
             submission = validate_comment_payload('about', payload)
-            context, parent = store.context(article_id, {**payload, 'parent_id': submission.parent_id})
+            context, parent = store.context(article_id, {**payload, 'parent_id': submission.parent_id}, owner, admin)
             actor = services['get_community_actor_hash'](submission.email)
             ip, client = services['get_community_rate_limit_keys'](request)
             services['community_comment_limiter'].check(ip, client, actor)
