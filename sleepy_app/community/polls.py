@@ -32,6 +32,7 @@ class PollStore:
                   poll_id TEXT NOT NULL, owner_hash TEXT NOT NULL, option_id TEXT NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY(poll_id, owner_hash));
+                CREATE INDEX IF NOT EXISTS idx_poll_owner ON article_poll_votes(owner_hash,poll_id);
                 CREATE INDEX IF NOT EXISTS idx_poll_options ON article_poll_votes(poll_id, option_id);
                 ''')
             self._ready = True
@@ -79,6 +80,15 @@ class PollStore:
                 db.execute('INSERT OR IGNORE INTO article_poll_definitions VALUES (?,?,?)', (p['id'],p['version'],encoded))
         return len(polls)
 
+    def discussion_blocks(self, owner=''):
+        """Batch authorization; quiz semantics are immutable across definition versions."""
+        self.initialize()
+        with self.community._connect() as db:
+            voted = {r[0] for r in db.execute('SELECT poll_id FROM article_poll_votes WHERE owner_hash=?', (owner,))} if owner else set()
+            rows = db.execute('SELECT id,body FROM article_poll_definitions').fetchall()
+        return {'poll:' + row['id'] for row in rows
+                if row['id'] in voted or json.loads(row['body']).get('answer') is None}
+
     def active(self, ident, version):
         try:
             stat = self.public_path.stat()
@@ -121,6 +131,8 @@ def register_polls(app, runtime, paths):
     import os
     store = PollStore(runtime.community_store, os.environ.get('SLEEPY_POLL_PUBLIC_MANIFEST') or Path(paths.article_manifest).with_name('polls.json'))
     app.extensions['article_polls'] = store
+    if 'article_comments' in app.extensions:
+        app.extensions['article_comments'].poll_store = store
     limiter = CommunityBurstLimiter(30)
 
     @app.route('/blog/community/polls/<ident>', methods=['GET', 'POST'])
