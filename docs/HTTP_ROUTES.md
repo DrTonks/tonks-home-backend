@@ -4,6 +4,7 @@
 
 | 方法 | URL | 当前实现 |
 |---|---|---|
+| GET | `/blog/friend-feeds` | `sleepy_app/blog/friend_feeds.py` · 每日好友 RSS/Atom 缓存 |
 | GET / POST | `/pet/recommendations` | `sleepy_app/personal/recommendations.py` · `pet_recommendations` |
 | DELETE | `/pet/recommendations/<int:recommendation_id>` | `sleepy_app/personal/recommendations.py` · `delete_pet_recommendation` |
 | GET | `/` | `sleepy_app/status/service.py` · `index` |

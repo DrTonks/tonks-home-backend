@@ -78,4 +78,6 @@ def create_app(paths=None):
     app.extensions["article_comments"].manifest_path = paths.article_manifest
     from sleepy_app.community.polls import register_polls
     register_polls(app, runtime, paths)
+    from sleepy_app.blog.friend_feeds import register_friend_feeds
+    register_friend_feeds(app, paths)
     return app

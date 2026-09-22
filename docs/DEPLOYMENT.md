@@ -1,5 +1,13 @@
 # 模块化版本的部署与回退
 
+## 好友 RSS 每日缓存
+
+新增 `GET /blog/friend-feeds`，供博客“每日一读”和友链更新时间使用。博客构建生成 `community/friend-feeds.json`；sleepy 默认读取 `SLEEPY_ARTICLE_MANIFEST` 同目录下的该文件，也可通过 `SLEEPY_FRIEND_FEEDS_MANIFEST` 指定绝对路径。订阅地址统一维护在博客的 `src/data/friends.ts`。
+
+`python server.py` 启动时运行内部检查线程，其他 WSGI 入口在首次请求时启动。每 24 小时抓取一次，清单变化时提前刷新。缓存默认位于 `SLEEPY_DATA_FILE` 同目录的 `friend-feeds-cache.json`，可用 `SLEEPY_FRIEND_FEEDS_CACHE` 指定。缓存目录必须可写；发布代码和每月重启时保留此文件，无需增加 crontab。单站失败时保留旧记录并标记过期。
+
+发布博客清单与 sleepy 新代码后重启 sleepy。现有 `/api` 转发若覆盖全部后端路径则无需修改；使用路径白名单时加入 `/api/blog/friend-feeds`。
+
 本版本已于 2026-09-20 经用户明确授权完成部署，结果见 REFACTOR_VALIDATION.md。以下流程用于后续版本；后续生产上传与 PM2 重启仍需用户批准。
 
 ## 发布前

@@ -192,6 +192,7 @@ class AllApiRoutesTest(unittest.TestCase):
             ("GET", "/agent-activity"),
             ("POST", "/agent-activity"),
             ("GET", "/blog-posts"),
+            ("GET", "/blog/friend-feeds"),
             ("GET", "/blog/views"),
             ("POST", "/blog/views/<path:slug>"),
             ("GET", "/blog/site-visits"),

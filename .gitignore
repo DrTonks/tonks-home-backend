@@ -58,3 +58,7 @@ github_stats_cache.json
 
 # Downloaded holiday cache (keep during code deployments)
 holiday-cache/
+
+# Daily RSS cache (preserve across deployments and monthly restarts)
+friend-feeds-cache.json
+friend-feeds-cache.json.*.tmp

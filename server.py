@@ -12,6 +12,7 @@ def main():
     from waitress import serve
     runtime = app.extensions['sleepy_runtime']
     runtime.d.load()
+    app.extensions['friend_feeds'].start()
     serve(app,
           host=os.environ.get('SLEEPY_HOST', runtime.d.data.get('host', '0.0.0.0')),
           port=int(os.environ.get('SLEEPY_PORT', runtime.d.data.get('port', 9010))),
