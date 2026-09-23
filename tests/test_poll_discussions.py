@@ -32,15 +32,16 @@ class PollDiscussionTests(unittest.TestCase):
         for owner in ['', 'bob']:
             result=self.store.listing('article',owner=owner)
             self.assertEqual({x['id'] for x in result['comments']},{self.open_id,self.text_id})
-            self.assertEqual(result['count'],2);self.assertEqual(result['locked_blocks'],['poll:quiz'])
+            self.assertEqual(result['count'],4);self.assertEqual(result['locked_blocks'],['poll:quiz'])
+            self.assertEqual(result['counts'],{'poll:open':1,'b_text':1})
             for kwargs in [dict(block='poll:quiz'),dict(root=self.quiz_id)]:
                 with self.assertRaises(CommunityValidationError):self.store.listing('article',owner=owner,**kwargs)
         self.polls.state('quiz','a'*64,'alice','a') # Wrong answers also unlock.
         self.assertEqual(self.store.listing('article',owner='alice')['count'],4)
         self.assertEqual(len(self.store.listing('article',root=self.quiz_id,owner='alice')['comments']),1)
-        self.assertEqual(self.store.listing('article',owner='bob')['count'],2)
+        self.assertEqual(self.store.listing('article',owner='bob')['count'],4)
         self.assertEqual(self.store.listing('article',admin=True)['count'],4)
-        self.assertEqual(self.store.get_public_totals_by_slug(['post']),{'post':2})
+        self.assertEqual(self.store.get_public_totals_by_slug(['post']),{'post':4})
     def test_locked_posts_and_forged_reply_context_are_rejected(self):
         for payload in [dict(block_id='poll:quiz'),dict(parent_id=self.quiz_id,block_id='b_text'),dict(parent_id=self.reply_id)]:
             with self.assertRaises(CommunityValidationError):self.store.context('article',{**self.payload,**payload},owner='bob')
@@ -52,7 +53,8 @@ class PollDiscussionTests(unittest.TestCase):
         result=self.store.listing('article')
         self.assertEqual(len(result['comments']),2);self.assertIsNone(result['next_before'])
         self.store.poll_store=None
-        self.assertEqual(self.store.listing('article')['count'],1)
+        self.assertEqual(self.store.listing('article')['count'],29)
+        self.assertEqual({x['id'] for x in self.store.listing('article')['comments']},{self.text_id})
     def test_api_enforces_permission_before_moderation(self):
         app=Flask(__name__);moderator=Mock()
         register_article_comments(app,dict(community_store=self.community,verify_admin_secret=lambda:request.headers.get('X-Admin-Secret')=='secret',get_community_owner_hash=lambda r:r.headers.get('X-Community-Identity',''),comment_moderator=moderator))
@@ -61,7 +63,8 @@ class PollDiscussionTests(unittest.TestCase):
         for payload in [dict(block_id='poll:quiz'),dict(parent_id=self.quiz_id,block_id='poll:open')]:
             r=client.post(url,json={**self.payload,**payload});self.assertEqual(r.status_code,400);self.assertEqual(r.json['code'],'discussion_locked')
         moderator.moderate.assert_not_called()
-        r=client.get(url);self.assertIn('no-store',r.headers['Cache-Control']);self.assertIn('X-Community-Identity',r.headers['Vary']);self.assertEqual(r.json['count'],2)
+        r=client.get(url);self.assertIn('no-store',r.headers['Cache-Control']);self.assertIn('X-Community-Identity',r.headers['Vary']);self.assertEqual(r.json['count'],4)
+        self.assertEqual({x['id'] for x in r.json['comments']},{self.open_id,self.text_id})
+        self.assertNotIn('poll:quiz',r.json['counts'])
         self.assertEqual(client.get(url+'?root='+str(self.quiz_id)).status_code,400)
         self.assertEqual(client.get(url,headers={'X-Admin-Secret':'secret'}).json['count'],4)
-

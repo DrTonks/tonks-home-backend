@@ -126,12 +126,11 @@ class ArticleCommentStore:
         if not articles:
             return result
         self.initialize()
-        gate, gate_args = self.discussion_filter()
         placeholders = ','.join('?' for _ in articles)
         with self.community._connect() as db:
             rows = db.execute(
                 f"SELECT article_id,COUNT(*) n FROM article_comments WHERE status='published' "
-                f"AND article_id IN ({placeholders}) AND {gate} GROUP BY article_id", list(articles.values()) + gate_args)
+                f"AND article_id IN ({placeholders}) GROUP BY article_id", list(articles.values()))
             totals = {row['article_id']: row['n'] for row in rows}
         result.update({slug: totals.get(ident, 0) for slug, ident in articles.items()})
         return result
@@ -217,6 +216,10 @@ class ArticleCommentStore:
         with self.community._connect() as db:
             counts = {r['block_id'] or '': r['n'] for r in db.execute(
                 f"SELECT block_id,COUNT(*) n FROM article_comments WHERE article_id=? AND status='published' AND {gate} GROUP BY block_id", [article_id] + gate_args)}
+            # The public total includes locked quiz discussions. Only the lists
+            # and per-block counts are filtered by the visitor's vote access.
+            public_count = db.execute("SELECT COUNT(*) FROM article_comments WHERE article_id=? AND status='published'",
+                                      (article_id,)).fetchone()[0]
             if root:
                 parent = db.execute(f'SELECT * FROM article_comments WHERE id=? AND article_id=? AND parent_id IS NULL AND {visible} AND {gate}', [root, article_id] + gate_args).fetchone()
                 if not parent:
@@ -241,7 +244,7 @@ class ArticleCommentStore:
                 item = self.public(row, owner, admin)
                 item['reply_count'] = db.execute(f'SELECT COUNT(*) FROM article_comments WHERE root_id=? AND parent_id IS NOT NULL AND {visible}', (row['id'],)).fetchone()[0]
                 comments.append(item)
-            return {'comments': comments, 'counts': counts, 'count': sum(counts.values()), 'locked_blocks': locked,
+            return {'comments': comments, 'counts': counts, 'count': public_count, 'locked_blocks': locked,
                     'next_before': rows[19]['id'] if len(rows) > 20 else None}
 
     def history(self, actor):
