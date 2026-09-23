@@ -90,6 +90,12 @@ Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 t
 
 完整接口见 [API文档.md](API文档.md)。
 
+## 发布到现有云服务器
+
+首次在本地执行 `pnpm install`，并按上文安装 Python 依赖。之后运行 `pnpm ship`：先运行单元测试和隔离数据的服务预检，再打包、上传、在云端再次预检、备份被替换的代码、重启 `sleepy-server` 和 `sleepy-notifications`，最后检查 PM2 与 HTTP 健康状态。失败时会恢复这次替换的代码。仅检查本地用 `pnpm ship:check`；只上传并验证、不切换线上服务用 `pnpm ship:dry-run`。
+
+默认读取相邻目录的私有 `serverSSH.txt`（两行分别为 `user@host` 和密码），也可用 `DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_PASS` 或 `DEPLOY_KEY_FILE`。普通 `pnpm ship` 保留云端 `.env` 和全部运行数据；需要更新配置时明确执行 `pnpm ship --env-file /path/to/production.env`，它会先备份云端旧 `.env`，再随代码一起切换和验证。`--env-file` 指向准备好的**生产**配置文件，不会自动拿开发配置覆盖线上。详细限制、回退位置和 PM2 环境变量优先级见 [部署文档](docs/DEPLOYMENT.md)。
+
 ## 文章浏览量与站点访问量
 
 文章浏览量存放在独立的 `analytics.sqlite3` 中，首次访问统计接口时自动创建，

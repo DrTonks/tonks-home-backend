@@ -38,6 +38,7 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+node_modules/
 venv/
 env/
 

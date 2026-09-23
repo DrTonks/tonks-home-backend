@@ -1,0 +1,13 @@
+{
+  "name": "tonks-home-backend-deploy",
+  "private": true,
+  "scripts": {
+    "ship": "node scripts/ship.mjs",
+    "ship:check": "node scripts/ship.mjs --check",
+    "ship:dry-run": "node scripts/ship.mjs --dry-run"
+  },
+  "devDependencies": {
+    "ssh2-sftp-client": "^9.1.0"
+  },
+  "packageManager": "pnpm@11.20.0"
+}

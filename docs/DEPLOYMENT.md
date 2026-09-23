@@ -8,7 +8,20 @@
 
 发布博客清单与 sleepy 新代码后重启 sleepy。现有 `/api` 转发若覆盖全部后端路径则无需修改；使用路径白名单时加入 `/api/blog/friend-feeds`。
 
-本版本已于 2026-09-20 经用户明确授权完成部署，结果见 REFACTOR_VALIDATION.md。以下流程用于后续版本；后续生产上传与 PM2 重启仍需用户批准。
+本版本已于 2026-09-20 部署，结果见 REFACTOR_VALIDATION.md。当前服务器固定为 `/var/sleepy`，网站和通知 worker 由 PM2 管理。日常发布可在仓库根目录执行 `pnpm ship`。
+
+## 一键发布
+
+1. 本地先准备 Python 3.10+ 虚拟环境并安装 `requirements.txt`，运行 `pnpm install`。`pnpm ship:check` 检查单元测试和独立数据的 Waitress 预检。正式发布和云端预演要求干净的 Git 工作树，还会抓取 `origin/main`，本地 HEAD 必须包含它的最新提交；先把待发布代码提交，防止云端有一份 Git 无法复原的版本。
+2. `pnpm ship:dry-run` 上传 SHA-256 校验的代码包，在云端运行同一预检并列出将更新的文件数量，不切换生产代码或重启 PM2。
+3. `pnpm ship` 完成相同检查后，备份将替换的代码，短暂停止 `sleepy-server` 与 `sleepy-notifications`，更新代码，执行 `pm2 restart --update-env`，检查两个进程在线和本地 HTTP 接口。正常异常会自动恢复旧代码并重启。备份留在 `/var/sleepy/.release-backups/<release-id>`。
+4. 默认保留云端 `.env`、数据库、`data.json`、RSS 缓存、媒体等文件。要更新生产配置，用 `pnpm ship --env-file /绝对路径/production.env`；预演可用 `pnpm ship:dry-run --env-file /绝对路径/production.env`。发布前不会读取或输出密钥值；云端旧 `.env` 会一并备份，异常时恢复。这个参数应指向完整的生产配置，不是增量片段。
+
+命令使用 `../serverSSH.txt` 的连接信息，也可设置 `DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_PASS` 或 `DEPLOY_KEY_FILE`；覆盖 Python 用 `SLEEPY_PYTHON`。当前脚本只接受已核实的 `/var/sleepy`，并保留云端原有 `report_app.py` 和 `upload_agent_stats.py`，防止覆盖与本仓库不同的独立任务。`requirements.txt` 有变化时会拒绝发布；先单独迁移云端虚拟环境。云端 PM2 进程变量优先于 `.env`，如果待同步的键被 PM2 覆盖，发布会拒绝并列出键名。正常发布会重启服务以重新加载云端 `.env`。
+
+第一次使用时，如果云端代码与本地发布包不同，命令会拒绝覆盖；先对照预演列出的文件，把需要保留的云端改动收录进 Git 并通过测试。首次成功发布后，脚本在 `.releases/ship-state.json` 记录托管代码的摘要；以后如果有人直接在云端改动这些文件，下一次发布会报告冲突并停止。这个摘要不包含 `.env` 或运行数据。
+
+SSH 被中断或远端进程被强制终止时，不能假设自动回退已完成；先检查 PM2、HTTP 状态和对应备份，再决定是否重试。脚本不恢复数据库快照，避免覆盖发布后产生的新数据。
 
 ## 发布前
 
