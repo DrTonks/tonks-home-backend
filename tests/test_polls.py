@@ -58,16 +58,21 @@ class PollTests(unittest.TestCase):
                 self.state(owner, option)
         self.assertFalse(self.state()['voted'])
 
-    def test_definition_sync_is_atomic_and_semantics_frozen(self):
+    def test_definition_sync_preserves_vote_semantics_but_allows_editorial_changes(self):
         second = {**self.poll, 'id': 'second'}
-        changed = {**self.poll, 'title': 'Changed question', 'version': 'b'*64}
+        changed = {**self.poll, 'answer': 'a', 'version': 'b'*64}
         with self.assertRaises(ValueError):
             self.store.sync(dict(schema=1, polls=[second, changed]))
         with self.community._connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM article_poll_definitions').fetchone()[0], 1)
-        for mutation in [dict(answer='a'), dict(explanation='Changed explanation'), dict(options=[dict(id='a', label='Changed'), dict(id='b', label='Two')])]:
+        for mutation in [dict(answer='a'), dict(options=[dict(id='a', label='Changed'), dict(id='b', label='Two')])]:
             with self.assertRaises(ValueError):
                 self.store.sync(dict(schema=1, polls=[{**self.poll, **mutation, 'version': 'c'*64}]))
+        editorial = {**self.poll, 'title': 'Updated question',
+                     'explanation': 'Updated explanation', 'version': 'd'*64}
+        self.store.sync(dict(schema=1, polls=[editorial]))
+        with self.community._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM article_poll_definitions').fetchone()[0], 2)
 
     def test_new_version_is_inactive_until_publication_and_rollback_preserves_votes(self):
         self.state(option='a')

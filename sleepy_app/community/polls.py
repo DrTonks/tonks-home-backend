@@ -7,6 +7,13 @@ from flask import request, jsonify
 from sleepy_app.community.store import CommunityValidationError, CommunityRateLimitExceeded, CommunityBurstLimiter
 
 
+class PollDefinitionConflict(ValueError):
+    def __init__(self, poll_id, fields):
+        self.poll_id = poll_id
+        self.fields = fields
+        super().__init__(f"Poll {poll_id} changed immutable fields: {', '.join(fields)}; use a new ID")
+
+
 class PollStore:
     def __init__(self, community, public_path):
         self.community = community
@@ -70,9 +77,15 @@ class PollStore:
                 # Keep all versions for release rollback, but never reinterpret existing votes.
                 for row in old:
                     previous = json.loads(row['body'])
-                    semantics = lambda x: (x['title'], sorted((o['id'], o['label']) for o in x['options']), x.get('answer'), x.get('explanation'))
-                    if semantics(previous) != semantics(p):
-                        raise ValueError(f"Poll {p['id']} changed; use a new ID for changed questions/options")
+                    # Editorial changes preserve choices and discussion identity.
+                    changed = []
+                    choices = lambda x: sorted((o['id'], o['label']) for o in x['options'])
+                    if choices(previous) != choices(p):
+                        changed.append('options')
+                    if previous.get('answer') != p.get('answer'):
+                        changed.append('answer')
+                    if changed:
+                        raise PollDefinitionConflict(p['id'], changed)
                 encoded = json.dumps(p, ensure_ascii=False, sort_keys=True)
                 same = db.execute('SELECT body FROM article_poll_definitions WHERE id=? AND version=?', (p['id'],p['version'])).fetchone()
                 if same and same['body'] != encoded:
