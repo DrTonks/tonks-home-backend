@@ -12,7 +12,7 @@
 
 ## 一键发布
 
-1. 本地先准备 Python 3.10+ 虚拟环境并安装 `requirements.txt`，运行 `pnpm install`。`pnpm ship:check` 检查单元测试和独立数据的 Waitress 预检。正式发布和云端预演要求干净的 Git 工作树，还会抓取 `origin/main`，本地 HEAD 必须包含它的最新提交；先把待发布代码提交，防止云端有一份 Git 无法复原的版本。
+1. 本地先准备 Python 3.10+ 虚拟环境并安装 `requirements.txt`，运行 `pnpm install`。`pnpm ship:check` 检查单元测试和独立数据的 Waitress 预检。正式发布和云端预演要求运行代码、测试及部署脚本已提交；README、部署文档、`example.jsonc`、`.env.example` 的未提交修改不会单独拦截发布。命令还会抓取 `origin/main`，本地 HEAD 必须包含它的最新提交，防止云端出现 Git 无法复原的代码版本。
 2. `pnpm ship:dry-run` 上传 SHA-256 校验的代码包，在云端运行同一预检并列出将更新的文件数量，不切换生产代码或重启 PM2。
 3. `pnpm ship` 完成相同检查后，备份将替换的代码，短暂停止 `sleepy-server` 与 `sleepy-notifications`，更新代码，执行 `pm2 restart --update-env`，检查两个进程在线和本地 HTTP 接口。正常异常会自动恢复旧代码并重启。备份留在 `/var/sleepy/.release-backups/<release-id>`。
 4. 默认保留云端 `.env`、数据库、`data.json`、RSS 缓存、媒体等文件。要更新生产配置，用 `pnpm ship --env-file /绝对路径/production.env`；预演可用 `pnpm ship:dry-run --env-file /绝对路径/production.env`。发布前不会读取或输出密钥值；云端旧 `.env` 会一并备份，异常时恢复。这个参数应指向完整的生产配置，不是增量片段。

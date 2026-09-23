@@ -60,10 +60,17 @@ function credentials() {
 }
 
 function checkGitBase() {
-  const dirty = spawnSync('git', ['status', '--porcelain', '--untracked-files=normal'],
+  const releaseSources = [
+    'server.py', 'manage_article_views.py', 'comment_moderation_prompt.md',
+    'requirements.txt', 'sleepy_app', 'pet_ai', 'clients', 'jsonc_parser',
+    'scripts/preflight.py', 'scripts/package_release.py', 'scripts/ship.mjs',
+    'scripts/ship_remote.py', 'package.json', 'pnpm-lock.yaml',
+    'pnpm-workspace.yaml', 'tests',
+  ];
+  const dirty = spawnSync('git', ['status', '--porcelain', '--untracked-files=normal', '--', ...releaseSources],
     { cwd: root, encoding: 'utf8', windowsHide: true });
   if (dirty.status !== 0 || dirty.stdout.trim()) {
-    throw new Error('发布要求干净的 Git 工作树；请先提交或清理本地改动');
+    throw new Error('发布代码、测试或部署脚本有未提交改动；请先提交或清理');
   }
   const fetched = spawnSync('git', ['fetch', 'origin', 'main'], { cwd: root, encoding: 'utf8', windowsHide: true });
   if (fetched.status !== 0) throw new Error(`无法核对远程 Git 分支：${(fetched.stderr || '').slice(-1000)}`);
