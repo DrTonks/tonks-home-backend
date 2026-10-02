@@ -18,6 +18,9 @@ class ReactionTests(unittest.TestCase):
             self.assertEqual(parse_reply(json.dumps({'reply': '正常回复。', 'emoji_id': value}), 'static'), ('正常回复。', None))
         self.assertIn('u_cheer', {i['id'] for i in choices('live2d')})
         self.assertNotIn('quiet_happy', {i['id'] for i in choices('live2d')})
+        self.assertEqual(parse_reply('{"reply":"休息一下。","emoji_id":"u_drink"}', 'static'), ('休息一下。', 'u_drink'))
+        self.assertEqual(parse_reply('{"reply":"想一想。","emoji_id":"u_tv_think"}', 'live2d'), ('想一想。', 'u_tv_think'))
+        self.assertEqual(parse_reply('{"reply":"想一想。","emoji_id":"u_tv_think"}', 'static'), ('想一想。', None))
 
     def test_malformed_or_empty_structured_reply_never_leaks_json(self):
         for content in ['{"reply":"broken', '{"emoji_id":"quiet_happy"}', '{"reply":42}', '[]']:

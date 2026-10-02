@@ -68,6 +68,7 @@
       "id": "u_surprise",
       "description": "吃惊，意料之外的消息",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -75,6 +76,7 @@
       "id": "u_drink",
       "description": "喝水休息一下",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -82,6 +84,7 @@
       "id": "u_confused",
       "description": "困惑，没太明白",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -117,6 +120,7 @@
       "id": "u_speechless",
       "description": "无言以对、短暂沉默",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -124,6 +128,7 @@
       "id": "u_embarrassed",
       "description": "流汗、尴尬、心虚",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -131,6 +136,7 @@
       "id": "u_best",
       "description": "举起第一名牌子，夸奖、祝贺",
       "pets": [
+        "static",
         "live2d"
       ]
     },
@@ -169,6 +175,76 @@
       "description": "送花，鼓励、感谢、祝福",
       "pets": [
         "static",
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_doge",
+      "description": "小电视 doge，俏皮玩笑、心照不宣",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_chuckle",
+      "description": "小电视捂嘴偷笑，忍不住的开心",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_angry",
+      "description": "小电视发怒，气呼呼地抗议",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_cute",
+      "description": "小电视托脸卖萌，亲切地打招呼",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_sleep",
+      "description": "小电视困倦，没睡醒、准备休息",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_cool",
+      "description": "小电视戴墨镜，佩服、夸奖、得意",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_grievance",
+      "description": "小电视委屈落泪，难过、想被安慰",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_shy",
+      "description": "小电视害羞脸红，被夸奖后的不好意思",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_think",
+      "description": "小电视扶眼镜思考，认真琢磨",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_tv_surprise",
+      "description": "小电视惊吓，突然听到意外消息",
+      "pets": [
         "live2d"
       ]
     }
