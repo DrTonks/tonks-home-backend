@@ -77,7 +77,8 @@ def create_pet_ai_blueprint() -> Blueprint:
                         result = event
                 if result is None:
                     raise ProviderError("empty_reply")
-                return jsonify({"success": True, "reply": result["reply"]})
+                return jsonify({"success": True, "reply": result["reply"],
+                                **({"emoji_id": result["emoji_id"]} if result.get("emoji_id") else {})})
             except ProviderError as exc:
                 return _json_error(exc.code, 503)
             except Exception:

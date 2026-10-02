@@ -12,6 +12,7 @@ from .provider import OpenAICompatibleProvider, ProviderError
 from .rate_limit import PetAIRateLimiter, RateLimitExceeded
 from .search import FixedHostWebSearch, SearchError
 from .validation import PetAIRequest
+from .reactions import choices, parse_reply
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -106,6 +107,8 @@ class PetAIService:
                 _read_text(BASE_DIR / "prompts" / "safety.md"),
                 _read_text(BASE_DIR / "personas" / f"{request.pet_id}.md"),
                 _read_text(BASE_DIR / "prompts" / "response.md"),
+                "可选表情池（仅按含义选一张；没有贴切选项就用 null）："
+                + json.dumps(choices(request.pet_id), ensure_ascii=False),
             ]
         )
         user_data = {
@@ -181,7 +184,7 @@ class PetAIService:
 
         # Some providers ignore optional tools and answer with uncertainty or a
         # title-based guess. Search once before such a reply is allowed through.
-        elif allow_search and self._needs_search(_message_content(message)):
+        elif allow_search and self._needs_search(parse_reply(_message_content(message), request.pet_id)[0]):
             query = self._fallback_query(request)
             if query:
                 search_attempted = True
@@ -215,8 +218,10 @@ class PetAIService:
                 yield {"type": "status", "stage": "thinking"}
                 message = self.provider.chat(messages)
 
-        reply = sanitize_reply(_message_content(message))
+        reply_text, emoji_id = parse_reply(_message_content(message), request.pet_id)
+        reply = sanitize_reply(reply_text)
         if search_attempted and not search_had_results and self._needs_search(reply):
+            emoji_id = None
             title = request.answer.strip()[:60]
             reply = (
                 f"我暂时没查到《{title}》的可靠资料……先不凭名字妄加判断。"
@@ -225,7 +230,7 @@ class PetAIService:
             )
         if not reply:
             raise ProviderError("empty_reply")
-        yield {"type": "result", "reply": reply}
+        yield {"type": "result", "reply": reply, **({"emoji_id": emoji_id} if emoji_id else {})}
 
     def _search_payload(self, query: str) -> dict[str, Any]:
         try:

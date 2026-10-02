@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "items": [
+    {
+      "id": "quiet_angry",
+      "description": "沉默地生气，有点不满",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_pout",
+      "description": "气鼓鼓，轻微抗议",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_cry",
+      "description": "委屈、难过，希望被陪伴",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_happy",
+      "description": "微笑送花，含蓄的开心与感谢",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_cheer",
+      "description": "好耶，收到好消息",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_sleep",
+      "description": "困倦、晚安、盖好被子",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_think",
+      "description": "托腮思考，安静地倾听",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "quiet_wait",
+      "description": "有点紧张，等待回应",
+      "pets": [
+        "static"
+      ]
+    },
+    {
+      "id": "u_cute",
+      "description": "俏皮地卖萌、打招呼",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_surprise",
+      "description": "吃惊，意料之外的消息",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_drink",
+      "description": "喝水休息一下",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_confused",
+      "description": "困惑，没太明白",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_cry",
+      "description": "夸张地哭哭、委屈",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_laugh",
+      "description": "大笑，真的很开心",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_grievance",
+      "description": "委屈巴巴，轻轻抱怨",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_angry",
+      "description": "气呼呼，抗议被戳",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_speechless",
+      "description": "无言以对、短暂沉默",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_embarrassed",
+      "description": "流汗、尴尬、心虚",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_best",
+      "description": "举起第一名牌子，夸奖、祝贺",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_cheer",
+      "description": "比耶、庆祝、打招呼",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "u_gloomy",
+      "description": "郁闷，心情有点低落",
+      "pets": [
+        "live2d"
+      ]
+    },
+    {
+      "id": "cat_coffee",
+      "description": "捧着咖啡，休息片刻",
+      "pets": [
+        "static",
+        "live2d"
+      ]
+    },
+    {
+      "id": "cat_comfy",
+      "description": "裹着被子，困倦、晚安",
+      "pets": [
+        "static",
+        "live2d"
+      ]
+    },
+    {
+      "id": "cat_flower",
+      "description": "送花，鼓励、感谢、祝福",
+      "pets": [
+        "static",
+        "live2d"
+      ]
+    }
+  ]
+}
