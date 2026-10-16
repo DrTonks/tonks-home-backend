@@ -2,6 +2,7 @@
 import os
 from sleepy_app.blog.slugs import normalize_blog_slug
 from sleepy_app.blog.images import blog_image_url, normalize_blog_images
+from sleepy_app.blog.dates import latest_dated_entry
 from sleepy_app.common.environment import configured_value
 import sleepy_app.common.responses as u
 from flask import request
@@ -155,29 +156,29 @@ class BlogService:
         ).rstrip('/')
         result = {'featuredProject': None, 'featuredTimeline': None}
 
-        # 获取最新项目（按 startDate 降序）
+        # 按实际日历日期选择最新项目，兼容旧数据中未补零的月份和日期。
         try:
             projects_url = f'{blog_data_url}/projects.json'
             req = urllib.request.Request(projects_url, headers={'User-Agent': 'SleepyBackend/1.0'})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 projects = json.loads(resp.read().decode('utf-8'))
-                if isinstance(projects, list) and len(projects) > 0:
-                    projects.sort(key=lambda x: x.get('startDate', ''), reverse=True)
-                    p = normalize_blog_images(projects[0], self._blog_image_base())
+                project = latest_dated_entry(projects)
+                if project is not None:
+                    p = normalize_blog_images(project, self._blog_image_base())
                     p['links'] = self._extract_links(p, 'project')
                     result['featuredProject'] = p
         except Exception as e:
             u.error(f'Blog projects fetch failed: {e}')
 
-        # 获取最新时光机条目（按 startDate 降序）
+        # 时光机使用同一日期规则；无效日期不会挤掉正常条目。
         try:
             timeline_url = f'{blog_data_url}/timeline.json'
             req = urllib.request.Request(timeline_url, headers={'User-Agent': 'SleepyBackend/1.0'})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 timeline = json.loads(resp.read().decode('utf-8'))
-                if isinstance(timeline, list) and len(timeline) > 0:
-                    timeline.sort(key=lambda x: x.get('startDate', ''), reverse=True)
-                    t = normalize_blog_images(timeline[0], self._blog_image_base())
+                entry = latest_dated_entry(timeline)
+                if entry is not None:
+                    t = normalize_blog_images(entry, self._blog_image_base())
                     t['links'] = self._extract_links(t, 'timeline')
                     result['featuredTimeline'] = t
         except Exception as e:
