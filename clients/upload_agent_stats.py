@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-上传 Claude Code 使用统计到 Sleepy 服务器。
+上传 Claude Code / Codex 使用统计到 Sleepy 服务器。
 每次运行时会先从JSONL会话文件重新计算统计数据，更新stats-cache.json，再上传。
 
 用法:
@@ -20,8 +20,9 @@ import sys
 import urllib.request
 import urllib.error
 import argparse
+import hashlib
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 # === 路径工具 ===
@@ -41,7 +42,8 @@ def get_projects_dir():
 
 def get_codex_sessions_dir():
     """Return the Codex CLI/Desktop session-log directory."""
-    return os.path.join(os.path.expanduser('~'), '.codex', 'sessions')
+    codex_home = os.environ.get('CODEX_HOME') or os.path.join(os.path.expanduser('~'), '.codex')
+    return os.path.join(os.path.expanduser(codex_home), 'sessions')
 
 
 # === stats-cache.json 读写 ===
@@ -161,58 +163,167 @@ def process_session_file(filepath, is_subagent, parent_session_id):
 
 
 def find_codex_session_files():
-    """Recursively find Codex rollout JSONL session logs."""
+    """Find active and archived rollouts (including custom CODEX_HOME)."""
     sessions_dir = get_codex_sessions_dir()
-    if not os.path.isdir(sessions_dir):
-        return []
+    archive_dir = os.path.join(os.path.dirname(sessions_dir), 'archived_sessions')
+    files = set()
+    for directory in (sessions_dir, archive_dir):
+        for root, _, names in os.walk(directory):
+            for name in names:
+                if name.endswith('.jsonl'):
+                    files.add(os.path.realpath(os.path.join(root, name)))
+    return sorted(files)
 
-    files = []
-    for root, _, names in os.walk(sessions_dir):
-        for name in names:
-            if name.endswith('.jsonl'):
-                files.append(os.path.join(root, name))
-    return files
+
+def _fingerprint(value):
+    # Retain only hashes for deduplication, never message text in the cache/upload.
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    return hashlib.sha256(encoded).digest()
+
+
+def _codex_message(payload):
+    """Return a visible role and content fingerprint, or None for context/reasoning."""
+    role = payload.get('role')
+    if role not in ('user', 'assistant'):
+        return None
+    if role == 'assistant' and (
+        payload.get('channel') in ('analysis', 'summary')
+        or payload.get('phase') in ('analysis', 'summary')
+    ):
+        return None
+    content = payload.get('content', [])
+    if not isinstance(content, list):
+        return None
+    text = '\n'.join(
+        block['text'] for block in content
+        if isinstance(block, dict) and isinstance(block.get('text'), str)
+    ).strip()
+    if role == 'user':
+        metadata = payload.get('internal_chat_message_metadata_passthrough')
+        kinds = metadata.get('content_item_kinds') if isinstance(metadata, dict) else None
+        if isinstance(kinds, list) and kinds and not any(
+            isinstance(kind, str) and (kind.startswith('user.') or kind == 'unknown')
+            for kind in kinds
+        ):
+            return None
+        if text.startswith(('# AGENTS.md instructions', '<environment_context>',
+                            '<permissions instructions>', '<turn_aborted>',
+                            '<user_instructions>', '<subagent_notification>')):
+            return None
+    if not content:
+        return None
+    return role, _fingerprint(text if text else content)
+
+
+def process_codex_session_files(filepaths):
+    """Count old event_msg and new response_item formats without double counting.
+
+    Rollout segments share session_meta.id. Deduplicate records across active,
+    archived and resumed copies, then reconcile the two message representations.
+    Match mirrored messages by session, role, content and nearby timestamps.
+    The time window prevents repeated prompts later in a resumed session from
+    disappearing when the log format changes.
+    """
+    daily = defaultdict(lambda: {'msg': 0, 'tool': 0, 'sids': set()})
+    seen = set()
+    messages = defaultdict(lambda: {'event_msg': [], 'response_item': []})
+    for filepath in filepaths:
+        session_id = os.path.splitext(os.path.basename(filepath))[0]
+        background_review = False
+        occurrences = Counter()
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    payload = entry.get('payload')
+                    if not isinstance(payload, dict):
+                        continue
+                    entry_type = entry.get('type')
+                    if entry_type == 'session_meta':
+                        if isinstance(payload.get('id'), str) and payload['id']:
+                            session_id = payload['id']
+                        source = payload.get('source')
+                        subagent = source.get('subagent') if isinstance(source, dict) else None
+                        background_review = (
+                            payload.get('thread_source') == 'guardian_review'
+                            or isinstance(subagent, dict) and subagent.get('other') == 'guardian'
+                        )
+                        continue
+                    if background_review:
+                        continue
+                    timestamp = entry.get('timestamp')
+                    if not isinstance(timestamp, str):
+                        continue
+                    try:
+                        parsed_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    except ValueError:
+                        continue
+                    if parsed_time.tzinfo is None:
+                        parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+                    date_key = parsed_time.astimezone(timezone.utc).strftime('%Y-%m-%d')
+                    kind = payload.get('type')
+                    message = None
+                    tool = entry_type == 'response_item' and kind in ('custom_tool_call', 'function_call')
+                    if entry_type == 'event_msg' and kind in ('user_message', 'agent_message'):
+                        role = 'user' if kind == 'user_message' else 'assistant'
+                        content = payload.get('message')
+                        if isinstance(content, str):
+                            message = role, _fingerprint(content.strip())
+                    elif entry_type == 'response_item' and kind == 'message':
+                        message = _codex_message(payload)
+                    if not tool and message is None:
+                        continue
+
+                    record_id = payload.get('call_id') if tool else payload.get('id')
+                    if isinstance(record_id, str) and record_id:
+                        record_key = (session_id, 'tool' if tool else entry_type, record_id)
+                    else:
+                        # Multiplicity preserves repeated identical records within one
+                        # file, while avoiding counting a copied file a second time.
+                        digest = _fingerprint(entry)
+                        occurrences[digest] += 1
+                        record_key = (session_id, digest, occurrences[digest])
+                    if record_key in seen:
+                        continue
+                    seen.add(record_key)
+                    stats = daily[date_key]
+                    stats['sids'].add(session_id)
+                    if tool:
+                        stats['tool'] += 1
+                    else:
+                        messages[(session_id, *message)][entry_type].append((parsed_time.timestamp(), date_key))
+        except OSError as e:
+            print(f'  Warning: unable to process Codex session {filepath}: {e}')
+    for sources in messages.values():
+        legacy = sorted(sources['event_msg'])
+        responses = sorted(sources['response_item'])
+        left = right = 0
+        while left < len(legacy) and right < len(responses):
+            old, new = legacy[left], responses[right]
+            if abs(old[0] - new[0]) <= 5:
+                # Codex emits the visible event and response record together.
+                daily[min(old, new)[1]]['msg'] += 1
+                left += 1
+                right += 1
+            elif old < new:
+                daily[old[1]]['msg'] += 1
+                left += 1
+            else:
+                daily[new[1]]['msg'] += 1
+                right += 1
+        for _, date_key in legacy[left:] + responses[right:]:
+            daily[date_key]['msg'] += 1
+    return daily
 
 
 def process_codex_session_file(filepath):
-    """Aggregate activity from one Codex session without reading token usage.
-
-    User-visible messages are stored as event_msg records, while tool calls are
-    response_item records. Only their counts are retained.
-    """
-    daily = defaultdict(lambda: {'msg': 0, 'tool': 0, 'sids': set()})
-    session_id = os.path.splitext(os.path.basename(filepath))[0]
-
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                timestamp = entry.get('timestamp', '')
-                if not timestamp:
-                    continue
-                date_key = timestamp[:10]
-                entry_type = entry.get('type')
-                payload = entry.get('payload', {})
-
-                if entry_type == 'event_msg' and isinstance(payload, dict):
-                    if payload.get('type') in {'user_message', 'agent_message'}:
-                        daily[date_key]['msg'] += 1
-                        daily[date_key]['sids'].add(session_id)
-                elif entry_type == 'response_item' and isinstance(payload, dict):
-                    if payload.get('type') in {'custom_tool_call', 'function_call'}:
-                        daily[date_key]['tool'] += 1
-                        daily[date_key]['sids'].add(session_id)
-    except Exception as e:
-        print(f'  Warning: unable to process Codex session {filepath}: {e}')
-
-    return daily
+    """Compatibility helper for callers parsing one rollout."""
+    return process_codex_session_files([filepath])
 
 
 # === 统计计算 ===
@@ -237,15 +348,11 @@ def compute_daily_activity():
             aggregated[date_key]['tool'] += stats['tool']
             aggregated[date_key]['sids'].update(stats['sids'])
 
-    for filepath in codex_files:
-        daily = process_codex_session_file(filepath)
-        for date_key, stats in daily.items():
-            aggregated[date_key]['msg'] += stats['msg']
-            aggregated[date_key]['tool'] += stats['tool']
-            # Prefix prevents equal IDs from the two applications collapsing.
-            aggregated[date_key]['sids'].update(
-                f'codex:{sid}' for sid in stats['sids']
-            )
+    for date_key, stats in process_codex_session_files(codex_files).items():
+        aggregated[date_key]['msg'] += stats['msg']
+        aggregated[date_key]['tool'] += stats['tool']
+        # Prefix prevents equal IDs from the two applications collapsing.
+        aggregated[date_key]['sids'].update(f'codex:{sid}' for sid in stats['sids'])
 
     result = []
     for date_key in sorted(aggregated.keys()):
@@ -260,7 +367,7 @@ def compute_daily_activity():
     return result
 
 
-def update_stats_cache(cache_path=None):
+def update_stats_cache(cache_path=None, *, write=True):
     """重新计算统计并更新 stats-cache.json。
     返回更新后的 dailyActivity 列表。
     """
@@ -279,7 +386,7 @@ def update_stats_cache(cache_path=None):
     print(f'  日期范围: {date_range}')
 
     # 加载已有缓存并合并
-    print('[2/3] 更新缓存...')
+    print('[2/3] 更新缓存...' if write else '[2/3] 合并缓存（只读预览）...')
     existing = load_stats_cache(cache_path)
 
     if existing and existing.get('dailyActivity'):
@@ -311,8 +418,9 @@ def update_stats_cache(cache_path=None):
     cache['lastComputedDate'] = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     cache['dailyActivity'] = merged_activities
 
-    save_stats_cache(cache, cache_path)
-    print(f'  缓存已更新: {len(merged_activities)} 条记录')
+    if write:
+        save_stats_cache(cache, cache_path)
+        print(f'  缓存已更新: {len(merged_activities)} 条记录')
 
     return merged_activities
 
@@ -329,7 +437,7 @@ def get_machine_id():
 
 def upload_stats(server_url, secret, machine_id, activities):
     """上传 dailyActivity 到服务器（携带 machineId）"""
-    url = f"{server_url.rstrip('/')}/agent-activity?secret={secret}"
+    url = f"{server_url.rstrip('/')}/agent-activity"
     payload = {
         "machineId": machine_id,
         "dailyActivity": activities,
@@ -339,7 +447,7 @@ def upload_stats(server_url, secret, machine_id, activities):
     req = urllib.request.Request(
         url,
         data=data,
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'X-Admin-Secret': secret},
         method='POST'
     )
 
@@ -357,7 +465,7 @@ def upload_stats(server_url, secret, machine_id, activities):
 # === 主流程 ===
 
 def main():
-    parser = argparse.ArgumentParser(description='上传 Claude Code 使用统计到 Sleepy 服务器')
+    parser = argparse.ArgumentParser(description='上传 Claude Code / Codex 使用统计到 Sleepy 服务器')
     parser.add_argument('--server', default=os.environ.get('SLEEPY_SERVER_URL', 'http://127.0.0.1:9010'),
                         help='服务器地址（默认读取 SLEEPY_SERVER_URL）')
     parser.add_argument('--secret', default=os.environ.get('SLEEPY_ADMIN_SECRET'),
@@ -367,7 +475,7 @@ def main():
     parser.add_argument('--no-compute', action='store_true',
                         help='跳过会话文件扫描，直接使用已有缓存上传')
     parser.add_argument('--dry-run', action='store_true',
-                        help='仅显示即将上传的数据，不实际发送')
+                        help='仅显示即将上传的数据，不写缓存、不实际发送')
     parser.add_argument('--cache-file', default=None,
                         help='stats-cache.json 路径 (默认自动查找)')
     args = parser.parse_args()
@@ -386,7 +494,7 @@ def main():
             sys.exit(1)
         activities = cache.get('dailyActivity', [])
     else:
-        activities = update_stats_cache(cache_path)
+        activities = update_stats_cache(cache_path, write=not args.dry_run)
 
     if not activities:
         print('没有 dailyActivity 数据，无需上传')
@@ -415,7 +523,7 @@ def main():
 
     if args.dry_run:
         print(f'\n[dry-run] 未实际发送。')
-        print(f'将 POST 到: {args.server.rstrip("/")}/agent-activity?secret=***')
+        print(f'将 POST 到: {args.server.rstrip("/")}/agent-activity')
         return
 
     print(f'\n上传到: {args.server}')
