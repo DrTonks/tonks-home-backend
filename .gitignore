@@ -1,6 +1,9 @@
 # Private runtime configuration and state
 data.json
 analytics.sqlite3
+pet_search.sqlite3
+pet_search.sqlite3-shm
+pet_search.sqlite3-wal
 analytics.sqlite3-shm
 analytics.sqlite3-wal
 recommendations.sqlite3

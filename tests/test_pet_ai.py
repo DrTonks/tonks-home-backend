@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -85,13 +86,13 @@ class ProviderConfigTests(unittest.TestCase):
             configured.endpoint,
             "https://api.deepseek.com/chat/completions",
         )
-        self.assertEqual(configured.model, "deepseek-v4-flash")
+        self.assertEqual(configured.model, "deepseek-flash")
         self.assertFalse(configured.thinking_enabled)
 
     def test_direct_deepseek_payload_disables_thinking_but_keeps_tools(self):
         configured = config(
             endpoint="https://api.deepseek.com/chat/completions",
-            model="deepseek-v4-flash",
+            model="deepseek-v4-flash", model_auto=False,
         )
         provider = OpenAICompatibleProvider(configured)
         tool = {"type": "function", "function": {"name": "web_search"}}
@@ -167,28 +168,25 @@ class ValidationTests(unittest.TestCase):
 
 
 class RateLimitTests(unittest.TestCase):
-    def test_minute_and_search_limits_are_independent(self):
+    def test_minute_limit_expires_independently_of_daily_limit(self):
         clock = [1_700_000_000.0]
-        limiter = PetAIRateLimiter(2, 10, 10, 1, now=lambda: clock[0])
+        limiter = PetAIRateLimiter(2, 10, 10, now=lambda: clock[0])
         limiter.check_request("client")
         limiter.check_request("client")
         with self.assertRaises(RateLimitExceeded):
             limiter.check_request("client")
-        limiter.check_search()
-        with self.assertRaises(RateLimitExceeded):
-            limiter.check_search()
         clock[0] += 61
         limiter.check_request("client")
 
     def test_rotating_client_ids_cannot_bypass_ip_limit(self):
-        limiter = PetAIRateLimiter(10, 2, 20, 10)
+        limiter = PetAIRateLimiter(10, 2, 20)
         limiter.check_request("same-ip", "client-a")
         limiter.check_request("same-ip", "client-b")
         with self.assertRaises(RateLimitExceeded):
             limiter.check_request("same-ip", "client-c")
 
     def test_rotating_ips_cannot_bypass_client_limit(self):
-        limiter = PetAIRateLimiter(10, 2, 20, 10)
+        limiter = PetAIRateLimiter(10, 2, 20)
         limiter.check_request("ip-a", "same-client")
         limiter.check_request("ip-b", "same-client")
         with self.assertRaises(RateLimitExceeded):
@@ -245,7 +243,7 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(search.queries, ["晴天 歌曲"])
         self.assertEqual(len(provider.calls), 2)
-        self.assertIsNone(provider.calls[1]["tools"])
+        self.assertIsNotNone(provider.calls[1]["tools"])
 
     def test_search_failure_still_asks_model_for_conservative_reply(self):
         provider = FakeProvider(
@@ -306,11 +304,51 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("旧人设", first_system)
         self.assertIn("新人设", second_system)
 
-    def test_non_search_question_never_receives_tool(self):
+    def test_mood_question_can_receive_search_tool(self):
         provider = FakeProvider([{"content": "我在这里。今天慢一点也没关系。"}])
         service = PetAIService(config(), provider=provider, search=FakeSearch())
         list(service.events(self.request("q_mood")))
+        self.assertIsNotNone(provider.calls[0]["tools"])
+
+    def test_missing_official_search_key_removes_tool_and_explains_availability(self):
+        provider = FakeProvider([{"content": "这部作品我还不了解。"}])
+        service = PetAIService(config(), provider=provider)
+        list(service.events(self.request()))
         self.assertIsNone(provider.calls[0]["tools"])
+        self.assertIn("本轮没有可用的联网搜索工具", provider.calls[0]["messages"][0]["content"])
+
+    def test_available_search_is_explicit_in_prompt_for_both_pets(self):
+        for pet in ("static", "live2d"):
+            provider = FakeProvider([{"content": "收到啦。"}])
+            service = PetAIService(config(), provider=provider, search=FakeSearch())
+            req = validate_payload({"pet_id": pet, "question_id": "q_recent_game", "answer": "游戏"})
+            list(service.events(req))
+            self.assertIsNotNone(provider.calls[0]["tools"])
+            self.assertIn("本轮已提供 web_search", provider.calls[0]["messages"][0]["content"])
+
+    def test_malformed_calls_use_one_work_title_fallback(self):
+        for calls in [
+            [{"function": None}],
+            [{"function": {"name": "web_search", "arguments": "[]"}}],
+        ]:
+            provider = FakeProvider([{"tool_calls": calls}, {"content": "作品已查到。"}])
+            search = FakeSearch()
+            list(PetAIService(config(), provider=provider, search=search).events(self.request()))
+            self.assertEqual(len(search.queries), 1)
+            messages = provider.calls[1]["messages"]
+            self.assertEqual(len(messages[-2]["tool_calls"]), 1)
+            self.assertEqual(messages[-1]["tool_call_id"], messages[-2]["tool_calls"][0]["id"])
+            self.assertIsNotNone(provider.calls[1]["tools"])
+
+    def test_empty_search_does_not_claim_verified_facts(self):
+        provider = FakeProvider([
+            {"content": "不知道这部作品。"}, {"content": "可能是一个冒险故事。"},
+        ])
+        search = FakeSearch()
+        search.results = []
+        events = list(PetAIService(config(), provider=provider, search=search).events(self.request()))
+        self.assertIn("暂时没查到", events[-1]["reply"])
+        self.assertNotIn("emoji_id", events[-1])
 
     def test_output_removes_questions_invites_and_caps_length(self):
         cleaned = sanitize_reply("U酱：这首歌很适合今晚听？如果你愿意，可以继续告诉我更多。")
@@ -332,6 +370,30 @@ class RouteTests(unittest.TestCase):
 
     def payload(self):
         return {"pet_id": "static", "question_id": "q_mood", "answer": "开心"}
+
+    def test_json_and_sse_share_durable_search_cache_without_exposing_sources(self):
+        from pet_ai.search import DeepSeekWebSearch
+        with tempfile.TemporaryDirectory() as temporary:
+            c = config(endpoint="https://api.deepseek.com/chat/completions",
+                       search_db_path=str(Path(temporary)/"search.sqlite3"), daily_search_limit=1)
+            call = {"tool_calls": [{"function": {"name": "web_search", "arguments": '{"query":"作品"}'}}]}
+            provider = FakeProvider([call, {"content": "这部作品值得细看。"}, call, {"content": "这部作品值得细看。"}])
+            upstream = mock.Mock()
+            upstream.search.return_value = [{"title":"作品", "snippet":"private-result-text", "url":"https://source.example"}]
+            search = DeepSeekWebSearch(c, client=upstream)
+            self.client.application.extensions["pet_ai_service"] = PetAIService(c, provider=provider, search=search)
+            payload = {"pet_id":"live2d", "question_id":"q_recent_anime", "answer":"作品"}
+            response = self.client.post("/pet/reply", json=payload)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json['success'])
+            stream = self.client.post("/pet/reply", json=payload, headers={"Accept":"text/event-stream"})
+            body = stream.get_data(as_text=True)
+            self.assertIn('"stage":"searching"', body)
+            self.assertIn('"type":"result"', body)
+            self.assertNotIn('private-result-text', body)
+            self.assertNotIn('source.example', body)
+            self.assertEqual(upstream.search.call_count, 1)
+            self.assertEqual(search.store.stats()[0]['cache_hits'], 1)
 
     def test_json_reply(self):
         response = self.client.post("/pet/reply", json=self.payload())

@@ -1,4 +1,4 @@
-"""Application-owned logging for community housekeeping."""
+"""Application-owned stderr sinks for operational events."""
 
 import logging
 
@@ -13,14 +13,23 @@ def configure_community_logging() -> None:
     This application owns the exact community logger's handlers; other loggers
     and their handlers are left alone. A stable handler name survives reloads.
     """
-    logger = logging.getLogger("community")
+    _configure_logger("community", COMMUNITY_HANDLER_NAME)
+
+
+def configure_pet_search_logging() -> None:
+    """Search events contain outcome/elapsed time only, no queries or secrets."""
+    _configure_logger("pet_ai.search", "sleepy.pet_search.stderr")
+
+
+def _configure_logger(name: str, handler_name: str) -> None:
+    logger = logging.getLogger(name)
     handler = next(
-        (item for item in logger.handlers if item.get_name() == COMMUNITY_HANDLER_NAME),
+        (item for item in logger.handlers if item.get_name() == handler_name),
         None,
     )
     if handler is None:
         handler = logging.StreamHandler()  # stderr, captured by the process manager
-        handler.set_name(COMMUNITY_HANDLER_NAME)
+        handler.set_name(handler_name)
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     # Detach stale/local handlers without closing resources another logger may use.

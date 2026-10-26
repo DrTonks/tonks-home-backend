@@ -2,7 +2,7 @@
 
 为 Tonks 主页与博客提供共享数据的 Python API 服务：从设备在线状态、日历与音乐，到文章统计、评论、段评和桌宠 AI。前端独立发布，动态数据由后端持久化。
 
-[API 文档](API文档.md) · [代码地图](docs/PROJECT_MAP.md) · [部署与回退](docs/DEPLOYMENT.md) · [本地验收](docs/REFACTOR_VALIDATION.md) · [邮件通知](docs/EMAIL_NOTIFICATIONS.md)
+[API 文档](API文档.md) · [代码地图](docs/PROJECT_MAP.md) · [部署与回退](docs/DEPLOYMENT.md) · [本地验收](docs/REFACTOR_VALIDATION.md) · [邮件通知](docs/EMAIL_NOTIFICATIONS.md) · [桌宠搜索](docs/PET_SEARCH.md)
 
 ## 项目地图
 
@@ -38,6 +38,7 @@ flowchart LR
 - GitHub 贡献与技术栈数据
 - 博客 RSS/Atom、项目和时间线摘要
 - 日历事件、待办事项与音乐文件管理
+- 桌宠 AI 与 DeepSeek 网页搜索：除生日外的回答题目按需检索、单回复最多 3 次、持久缓存和每日预算；官方模型列表自动选择 Flash
 - Agent 活动热力图：合并 Claude Code 与 Codex 的消息、会话和工具调用数量
 
 Agent 统计只上传按日聚合的活动量；不会读取、保存或上传 token 用量、会话原文或工具输出。

@@ -30,7 +30,7 @@
 | `sleepy_app/personal/` | 日历、待办、推荐服务和推荐存储 |
 | `sleepy_app/media/` | 音乐、封面、图片的 HTTP 服务 |
 | `sleepy_app/integrations/` | 天气、GeoIP、GitHub、节假日适配 |
-| `pet_ai/` | 保留原有桌宠蓝图、模型与工具调用模块 |
+| `pet_ai/` | 桌宠蓝图、模型、人设与工具编排；`search.py` 接 DeepSeek，`search_store.py` 持久缓存/预算，`search_status.py` 运维统计 |
 | `clients/` | Windows 状态和 Agent 统计上报实现 |
 | 根目录 `report_app.py`、`upload_agent_stats.py` | 原命令的薄入口；参数与当前目录不变 |
 | `manage_article_views.py` | 浏览量管理命令；与后端共用数据路径 |

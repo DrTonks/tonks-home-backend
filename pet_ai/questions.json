@@ -1,17 +1,22 @@
 {
+  "q_name": {
+    "prompt": "用户刚告诉你希望被如何称呼。自然地记住这个称呼并简短回应；不要搜索这个人的身份或个人资料。若确需核实用词的公开知识，只搜索一般词义，不携带完整称呼。",
+    "search_policy": "optional",
+    "context_fields": []
+  },
   "q_color": {
     "prompt": "用户刚告诉你喜欢的颜色。对这个偏好作一句符合人设的简短回应。",
-    "search_policy": "never",
+    "search_policy": "optional",
     "context_fields": ["previous_answer", "user_name"]
   },
   "q_food": {
     "prompt": "用户刚告诉你平时喜欢的食物。对这个偏好作一句符合人设的简短回应。",
-    "search_policy": "never",
+    "search_policy": "optional",
     "context_fields": ["previous_answer", "user_name"]
   },
   "q_mood": {
     "prompt": "用户刚描述了今天的心情。给予简短、自然、不过度医疗化的陪伴式回应。",
-    "search_policy": "never",
+    "search_policy": "optional",
     "context_fields": ["previous_answer", "user_name"]
   },
   "q_recent_music": {
@@ -26,7 +31,7 @@
   },
   "q_recent_food": {
     "prompt": "用户刚告诉你最近吃到的美食。作一句有生活感、符合人设的简短回应。",
-    "search_policy": "never",
+    "search_policy": "optional",
     "context_fields": ["previous_answer", "user_name", "city"]
   },
   "q_recent_book": {
@@ -41,7 +46,7 @@
   },
   "q_city_life": {
     "prompt": "用户刚描述了最近在所在城市的生活。结合已提供的城市和天气作一句简短、自然的回应，不要虚构当地事实。",
-    "search_policy": "never",
+    "search_policy": "optional",
     "context_fields": ["previous_answer", "user_name", "city", "weather"]
   }
 }

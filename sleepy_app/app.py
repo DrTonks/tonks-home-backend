@@ -2,7 +2,7 @@
 import os
 from flask import Flask
 from sleepy_app.common.environment import load_env_file
-from sleepy_app.common.logging import configure_community_logging
+from sleepy_app.common.logging import configure_community_logging, configure_pet_search_logging
 from sleepy_app.config import Paths
 from sleepy_app.runtime import Runtime
 from sleepy_app.community.articles import register_article_comments
@@ -11,6 +11,7 @@ from sleepy_app.community.avatars import community_qq_number, community_avatar_s
 def create_app(paths=None):
     load_env_file(os.environ.get('SLEEPY_ENV_FILE') or None)
     configure_community_logging()
+    configure_pet_search_logging()
     paths = paths or Paths.from_env()
     app = Flask('sleepy', static_folder=None)
     runtime = Runtime(app, paths)

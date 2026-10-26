@@ -108,7 +108,7 @@ def validate_payload(
         if previous:
             context["previous_answer"] = previous
     if "user_name" in allowed:
-        name = _text(raw_context.get("user_name"), "context.user_name", 30)
+        name = _text(raw_context.get("user_name"), "context.user_name", 50)
         if name:
             context["user_name"] = name
     if "city" in allowed:

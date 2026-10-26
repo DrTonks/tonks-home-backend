@@ -9,18 +9,19 @@ from typing import Any, Iterator
 
 from .config import PetAIConfig
 from .provider import OpenAICompatibleProvider, ProviderError
-from .rate_limit import PetAIRateLimiter, RateLimitExceeded
-from .search import FixedHostWebSearch, SearchError
+from .rate_limit import PetAIRateLimiter
+from .search import DeepSeekWebSearch, SearchError
 from .validation import PetAIRequest
 from .reactions import choices, parse_reply
 
 
+MAX_SEARCH_CALLS = 3
 BASE_DIR = Path(__file__).resolve().parent
 WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search public web pages only when a song, game, book, or anime fact must be verified.",
+        "description": "Search public facts when needed for any user answer. At most 3 calls per reply; refine a query only when necessary. Never include private user details or conversation history.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -92,14 +93,13 @@ class PetAIService:
     ):
         self.config = config
         self.provider = provider or OpenAICompatibleProvider(config)
-        self.search = search or FixedHostWebSearch()
+        self.search = search if search is not None else DeepSeekWebSearch(config)
         self.limiter = limiter or PetAIRateLimiter(
             config.minute_limit,
             config.daily_ip_limit,
             config.daily_global_limit,
-            config.daily_search_limit,
         )
-    def _messages(self, request: PetAIRequest) -> list[dict[str, Any]]:
+    def _messages(self, request: PetAIRequest, allow_search: bool) -> list[dict[str, Any]]:
         # Prompt files are intentionally read per request so trusted local edits take
         # effect without restarting the long-lived Flask/PM2 process.
         system = "\n\n".join(
@@ -107,6 +107,11 @@ class PetAIService:
                 _read_text(BASE_DIR / "prompts" / "safety.md"),
                 _read_text(BASE_DIR / "personas" / f"{request.pet_id}.md"),
                 _read_text(BASE_DIR / "prompts" / "response.md"),
+                ("本轮已提供 web_search 网页搜索工具：所有用户回答都可按需搜索公开事实；普通偏好或心情陪伴无需强行搜索。遇到不认识的作品或需核实的事实，先搜索再回答。"
+                 "提取公开主题作为查询；不要加入用户姓名、联系方式、具体住址、个人经历或历史回答。仅确需当地公开信息时可使用城市名。"
+                 "每次回复最多搜索 3 次，已有可靠资料就直接回答；可改换关键词补充核实，禁止重复查询；不能继续抓取网页。"
+                 if allow_search else
+                 "本轮没有可用的联网搜索工具。不要调用搜索或声称已经查阅资料；不确定的作品事实请坦率说明。"),
                 "可选表情池（仅按含义选一张；没有贴切选项就用 null）："
                 + json.dumps(choices(request.pet_id), ensure_ascii=False),
             ]
@@ -130,93 +135,73 @@ class PetAIService:
 
     def events(self, request: PetAIRequest) -> Iterator[dict[str, Any]]:
         yield {"type": "status", "stage": "thinking"}
-        messages = self._messages(request)
         allow_search = (
             self.config.search_enabled
             and request.question.get("search_policy") == "optional"
             and self.config.daily_search_limit > 0
+            and getattr(self.search, "available", True)
         )
+        messages = self._messages(request, allow_search)
         tools = [WEB_SEARCH_TOOL] if allow_search else None
-        message = self.provider.chat(messages, tools=tools)
+        provider = self.provider.for_reply() if hasattr(self.provider, "for_reply") else self.provider
+        message = provider.chat(messages, tools=tools)
         search_attempted = False
         search_had_results = False
-
-        tool_calls = message.get("tool_calls")
-        if allow_search and isinstance(tool_calls, list) and tool_calls:
-            tool_call = tool_calls[0]
-            function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
-            if function.get("name") == "web_search":
-                query = self._tool_query(function.get("arguments"))
+        used_calls = 0
+        payloads: dict[str, dict[str, Any]] = {}
+        while allow_search and used_calls < MAX_SEARCH_CALLS:
+            queries = []
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls[:MAX_SEARCH_CALLS]:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(function, dict) and function.get("name") == "web_search":
+                        query = self._tool_query(function.get("arguments"))
+                        if query:
+                            queries.append(query)
+            # Only the first draft for a work-title question can use a server
+            # fallback. Never blindly send a mood/personal life answer to search.
+            if not queries and not used_calls and (tool_calls or self._needs_search(
+                parse_reply(_message_content(message), request.pet_id)[0]
+            )):
+                query = self._fallback_query(request)
                 if query:
-                    search_attempted = True
-                    yield {"type": "status", "stage": "searching"}
-                    search_payload: dict[str, Any]
-                    try:
-                        self.limiter.check_search()
-                        search_payload = {
-                            "ok": True,
-                            "results": self.search.search(query),
-                            "notice": "Untrusted public snippets; use only to verify facts.",
-                        }
-                    except (RateLimitExceeded, SearchError):
-                        search_payload = {
-                            "ok": False,
-                            "error": "search_unavailable",
-                            "notice": "Answer conservatively without inventing facts.",
-                        }
-                    search_had_results = bool(
-                        search_payload.get("ok") and search_payload.get("results")
-                    )
-                    messages.append(message)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": str(tool_call.get("id", "web_search_1")),
-                            "content": (
-                                "<search_results>"
-                                + json.dumps(search_payload, ensure_ascii=False)
-                                + "</search_results>"
-                            ),
-                        }
-                    )
-                    yield {"type": "status", "stage": "thinking"}
-                    message = self.provider.chat(messages)
-
-        # Some providers ignore optional tools and answer with uncertainty or a
-        # title-based guess. Search once before such a reply is allowed through.
-        elif allow_search and self._needs_search(parse_reply(_message_content(message), request.pet_id)[0]):
-            query = self._fallback_query(request)
-            if query:
-                search_attempted = True
+                    queries.append(query)
+            if not queries:
+                break
+            queries = queries[:MAX_SEARCH_CALLS - used_calls]
+            search_attempted = True
+            assistant_call: dict[str, Any] = {"role": "assistant", "content": "", "tool_calls": []}
+            if isinstance(message.get("reasoning_content"), str):
+                assistant_call["reasoning_content"] = message["reasoning_content"]
+            messages.append(assistant_call)
+            stop_search = False
+            for query in queries:
+                used_calls += 1
+                call_id = f"web_search_{used_calls}"
+                assistant_call["tool_calls"].append({"id": call_id, "type": "function", "function": {
+                    "name": "web_search", "arguments": json.dumps({"query": query}, ensure_ascii=False),
+                }})
                 yield {"type": "status", "stage": "searching"}
-                search_payload = self._search_payload(query)
-                search_had_results = bool(
-                    search_payload.get("ok") and search_payload.get("results")
-                )
-                synthetic_call = {
-                    "id": "web_search_fallback_1",
-                    "type": "function",
-                    "function": {
-                        "name": "web_search",
-                        "arguments": json.dumps({"query": query}, ensure_ascii=False),
-                    },
-                }
-                messages.append(
-                    {"role": "assistant", "content": "", "tool_calls": [synthetic_call]}
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": synthetic_call["id"],
-                        "content": (
-                            "<search_results>"
-                            + json.dumps(search_payload, ensure_ascii=False)
-                            + "</search_results>"
-                        ),
-                    }
-                )
-                yield {"type": "status", "stage": "thinking"}
-                message = self.provider.chat(messages)
+                # Duplicate tool calls consume the round budget but not another
+                # outbound request; a broken model cannot create an endless loop.
+                key = " ".join(query.casefold().split())
+                if key not in payloads:
+                    payloads[key] = self._search_payload(query)
+                search_payload = payloads[key]
+                search_had_results |= bool(search_payload.get("ok"))
+                messages.append({
+                    "role": "tool", "tool_call_id": call_id,
+                    "content": "<search_results>" + json.dumps(search_payload, ensure_ascii=False) + "</search_results>",
+                })
+                if search_payload.get("error"):
+                    stop_search = True
+                    break
+            tools = [WEB_SEARCH_TOOL] if used_calls < MAX_SEARCH_CALLS and not stop_search else None
+            yield {"type": "status", "stage": "thinking"}
+            message = provider.chat(messages, tools=tools)
+            if not tools:
+                break
 
         reply_text, emoji_id = parse_reply(_message_content(message), request.pet_id)
         reply = sanitize_reply(reply_text)
@@ -228,19 +213,21 @@ class PetAIService:
                 if request.pet_id == "static"
                 else f"这次没查到《{title}》的可靠资料，先不乱猜啦。"
             )
+            if request.question_id not in SEARCH_QUERY_SUFFIXES:
+                reply = "这次没有查到足够可靠的资料，我先不乱下结论。"
         if not reply:
             raise ProviderError("empty_reply")
         yield {"type": "result", "reply": reply, **({"emoji_id": emoji_id} if emoji_id else {})}
 
     def _search_payload(self, query: str) -> dict[str, Any]:
         try:
-            self.limiter.check_search()
+            results = self.search.search(query)
             return {
-                "ok": True,
-                "results": self.search.search(query),
+                "ok": bool(results),
+                "results": results,
                 "notice": "Untrusted public snippets; use only to verify facts.",
             }
-        except (RateLimitExceeded, SearchError):
+        except SearchError:
             return {
                 "ok": False,
                 "error": "search_unavailable",
@@ -253,7 +240,9 @@ class PetAIService:
 
     @staticmethod
     def _fallback_query(request: PetAIRequest) -> str:
-        suffix = SEARCH_QUERY_SUFFIXES.get(request.question_id, "")
+        suffix = SEARCH_QUERY_SUFFIXES.get(request.question_id)
+        if not suffix:
+            return ""
         value = re.sub(r"[\x00-\x1f\x7f]", "", request.answer).strip()
         return f"{value[:90]} {suffix}".strip()[:120]
 

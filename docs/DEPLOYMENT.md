@@ -1,5 +1,9 @@
 # 模块化版本的部署与回退
 
+## 桌宠搜索持久数据
+
+DeepSeek Search 的 `pet_search.sqlite3` 保存缓存、日配额及并发租约，默认位于 `SLEEPY_DATA_DIR`。部署和月度重启必须保留数据库；运行用户需要目录写权限。无需新增依赖或定时任务，官方模型 Key 可直接复用。细节见 [桌宠网页搜索](PET_SEARCH.md)。
+
 ## 好友 RSS 每日缓存
 
 新增 `GET /blog/friend-feeds`，供博客“每日一读”和友链更新时间使用。博客构建生成 `community/friend-feeds.json`；sleepy 默认读取 `SLEEPY_ARTICLE_MANIFEST` 同目录下的该文件，也可通过 `SLEEPY_FRIEND_FEEDS_MANIFEST` 指定绝对路径。订阅地址统一维护在博客的 `src/data/friends.ts`。

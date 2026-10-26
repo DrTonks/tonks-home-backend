@@ -19,19 +19,16 @@ class PetAIRateLimiter:
         minute_limit: int,
         daily_ip_limit: int,
         daily_global_limit: int,
-        daily_search_limit: int,
         now: Callable[[], float] = time.time,
     ):
         self.minute_limit = minute_limit
         self.daily_ip_limit = daily_ip_limit
         self.daily_global_limit = daily_global_limit
-        self.daily_search_limit = daily_search_limit
         self._now = now
         self._minute: dict[str, deque[float]] = defaultdict(deque)
         self._daily_ip: dict[tuple[str, str], int] = defaultdict(int)
         self._daily_client: dict[tuple[str, str], int] = defaultdict(int)
         self._daily_global: dict[str, int] = defaultdict(int)
-        self._daily_search: dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
 
     def _day(self, now: float) -> str:
@@ -62,15 +59,6 @@ class PetAIRateLimiter:
             self._daily_global[day] += 1
             self._prune_days(day)
 
-    def check_search(self) -> None:
-        now = self._now()
-        day = self._day(now)
-        with self._lock:
-            if self._daily_search[day] >= self.daily_search_limit:
-                raise RateLimitExceeded("daily_search_limit")
-            self._daily_search[day] += 1
-            self._prune_days(day)
-
     def _prune_days(self, current_day: str) -> None:
         self._daily_ip = defaultdict(
             int,
@@ -83,8 +71,4 @@ class PetAIRateLimiter:
         self._daily_global = defaultdict(
             int,
             {key: value for key, value in self._daily_global.items() if key == current_day},
-        )
-        self._daily_search = defaultdict(
-            int,
-            {key: value for key, value in self._daily_search.items() if key == current_day},
         )

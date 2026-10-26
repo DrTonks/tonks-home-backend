@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from copy import copy
 import urllib.error
 import urllib.request
 from typing import Any
 
 from .config import PetAIConfig
+from .models import ModelResolver
 
 
 class ProviderError(RuntimeError):
@@ -19,6 +21,14 @@ class ProviderError(RuntimeError):
 class OpenAICompatibleProvider:
     def __init__(self, config: PetAIConfig):
         self.config = config
+        self.models = ModelResolver(config)
+        self._reply_model: str | None = None
+
+    def for_reply(self):
+        # Pin all tool rounds to one model, including across a cache refresh.
+        bound = copy(self)
+        bound._reply_model = self.models.resolve()
+        return bound
 
     def chat(
         self,
@@ -32,12 +42,12 @@ class OpenAICompatibleProvider:
             raise ProviderError("not_configured")
 
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": self._reply_model or self.models.resolve(),
             "messages": messages,
             "temperature": max(0.0, min(2.0, float(temperature))),
             "max_tokens": max_tokens or self.config.max_output_tokens,
         }
-        if self.config.endpoint.startswith("https://api.deepseek.com/"):
+        if self.config.official_endpoint:
             payload["thinking"] = {
                 "type": "enabled" if self.config.thinking_enabled else "disabled"
             }
