@@ -4,7 +4,6 @@ The release ZIP contains code only. Runtime data stays in /var/sleepy. Ordinary
 failures during activation restore code and (if requested) the previous .env.
 """
 import base64
-import fcntl
 import hashlib
 import json
 import os
@@ -282,6 +281,10 @@ def activate(directory, payload, changed, with_env):
 
 
 def main(parameters):
+    # POSIX locking is needed only on the Linux deployment host. Keep the
+    # validation/rollback helpers importable by local Windows regression tests.
+    import fcntl
+
     release_id = validate(parameters)
     releases = ROOT / '.releases'
     releases.mkdir(mode=0o700, exist_ok=True)
