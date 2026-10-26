@@ -41,7 +41,8 @@ class AgentActivityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # macOS exposes /var through /private/var; discovery returns real paths.
+        self.root = Path(self.tmp.name).resolve()
 
     def log(self, name, entries):
         path = self.root / name
